@@ -1,7 +1,8 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { 
   Play, Square, RefreshCw, AlertTriangle, CheckCircle, 
-  Wrench, Camera, ShieldAlert, Zap, AlertCircle
+  Wrench, Camera, Zap, AlertCircle, Maximize2, Minimize2, 
+  Scan, Sparkles, Volume2, VolumeX
 } from 'lucide-react';
 
 export default function InspectionView({
@@ -13,38 +14,38 @@ export default function InspectionView({
   useCameraHook,
   useAudioAlertHook,
   settings,
-  simulatedCanvas, // Optional virtual test bench canvas stream
+  simulatedCanvas,
   isSimulating,
 }) {
   const {
     videoRef,
     isActive: isCameraActive,
-    facingMode,
-    hasMultipleCameras,
     startCamera,
     stopCamera,
     switchCamera,
     error: cameraError,
   } = useCameraHook;
 
-  const { startAlarm, stopAlarm, initAudio, isMuted } = useAudioAlertHook;
+  const { startAlarm, stopAlarm, initAudio, isMuted, toggleMute } = useAudioAlertHook;
 
   const [isInspecting, setIsInspecting] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [inspectionResult, setInspectionResult] = useState({
-    status: 'IDLE', // 'IDLE' | 'SEARCHING' | 'PASS' | 'FAIL'
+    status: 'IDLE',
     message: 'Press "Start Inspection" to begin',
     sleeves: [],
     partDetected: false,
     missingCount: 0,
   });
 
+  const containerRef = useRef(null);
   const overlayCanvasRef = useRef(null);
   const animationFrameIdRef = useRef(null);
   const lastProcessTimeRef = useRef(0);
 
   const totalTargetSleeves = masterPart?.sleeves?.length || 3;
 
-  // Stop inspection and alarm on unmount
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopAlarm();
@@ -68,9 +69,9 @@ export default function InspectionView({
     }
   }, [inspectionResult.status, isInspecting, startAlarm, stopAlarm]);
 
-  // Start Inspection flow
+  // Start Inspection flow with full camera activation
   const handleStartInspection = async () => {
-    initAudio(); // Unlock audio context on user gesture
+    initAudio();
     if (!isSimulating && !isCameraActive) {
       const ok = await startCamera();
       if (!ok) return;
@@ -78,7 +79,7 @@ export default function InspectionView({
     setIsInspecting(true);
     setInspectionResult({
       status: 'SEARCHING',
-      message: 'Searching for plastic part...',
+      message: 'Quick Scan Active • Point camera at part',
       sleeves: [],
       partDetected: false,
       missingCount: 0,
@@ -100,7 +101,6 @@ export default function InspectionView({
       missingCount: 0,
     });
 
-    // Clear overlay canvas
     const canvas = overlayCanvasRef.current;
     if (canvas) {
       const ctx = canvas.getContext('2d');
@@ -108,32 +108,51 @@ export default function InspectionView({
     }
   };
 
+  // Single Quick Scan (Immediate one-tap scan)
+  const handleQuickScanNow = () => {
+    initAudio();
+    if (!isCameraActive && !isSimulating) {
+      handleStartInspection();
+      return;
+    }
+    processCurrentFrame();
+  };
+
+  // Process one frame
+  const processCurrentFrame = useCallback(() => {
+    if (!cvEngine) return;
+    const sourceElement = isSimulating ? simulatedCanvas : videoRef.current;
+    if (!sourceElement) return;
+
+    const w = sourceElement.videoWidth || sourceElement.width;
+    const h = sourceElement.videoHeight || sourceElement.height;
+    if (!w || !h || w <= 0 || h <= 0) return;
+
+    try {
+      const result = cvEngine.processFrame(sourceElement, settings);
+      if (result) {
+        setInspectionResult(result);
+        drawOverlay(result, sourceElement);
+      }
+    } catch (err) {
+      console.warn('Scan frame error:', err);
+    }
+  }, [cvEngine, isSimulating, simulatedCanvas, videoRef, settings]);
+
   // Continuous Inspection Loop
   const runInspectionLoop = useCallback(() => {
-    if (!isInspecting || !cvEngine || !cvReady) return;
+    if (!isInspecting) return;
 
     const now = performance.now();
-    const interval = settings?.inspectionIntervalMs || 100;
+    const interval = settings?.inspectionIntervalMs || 80;
 
     if (now - lastProcessTimeRef.current >= interval) {
       lastProcessTimeRef.current = now;
-
-      // Select active frame source: Simulated bench or live video
-      const sourceElement = isSimulating ? simulatedCanvas : videoRef.current;
-
-      if (sourceElement && (sourceElement.videoWidth > 0 || sourceElement.width > 0)) {
-        try {
-          const result = cvEngine.processFrame(sourceElement, settings);
-          setInspectionResult(result);
-          drawOverlay(result, sourceElement);
-        } catch (err) {
-          console.error('Frame inspection error:', err);
-        }
-      }
+      processCurrentFrame();
     }
 
     animationFrameIdRef.current = requestAnimationFrame(runInspectionLoop);
-  }, [isInspecting, cvEngine, cvReady, settings, isSimulating, simulatedCanvas, videoRef]);
+  }, [isInspecting, settings, processCurrentFrame]);
 
   useEffect(() => {
     if (isInspecting) {
@@ -150,7 +169,16 @@ export default function InspectionView({
     };
   }, [isInspecting, runInspectionLoop]);
 
-  // Draw HUD Overlays (Green/Red circles, labels, part boundary)
+  // Toggle Fullscreen on device
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      containerRef.current?.requestFullscreen?.().then(() => setIsFullscreen(true)).catch(() => {});
+    } else {
+      document.exitFullscreen?.().then(() => setIsFullscreen(false)).catch(() => {});
+    }
+  };
+
+  // Draw HUD Overlays (Reticle, Green/Red circles, labels)
   const drawOverlay = (result, source) => {
     const canvas = overlayCanvasRef.current;
     if (!canvas) return;
@@ -166,68 +194,80 @@ export default function InspectionView({
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    if (!result.partDetected) {
-      // Draw subtle target reticle when searching for part
-      const cx = canvas.width / 2;
-      const cy = canvas.height / 2;
-      const r = Math.min(canvas.width, canvas.height) * 0.32;
+    const cx = canvas.width / 2;
+    const cy = canvas.height / 2;
 
-      ctx.save();
-      ctx.strokeStyle = 'rgba(217, 119, 6, 0.7)';
-      ctx.setLineDash([8, 6]);
-      ctx.lineWidth = 2.5;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
-      ctx.stroke();
+    // Draw Sleek Alignment Reticle
+    const reticleW = Math.min(canvas.width, canvas.height) * 0.75;
+    const reticleH = reticleW * 0.7;
 
-      ctx.font = 'bold 14px sans-serif';
-      ctx.fillStyle = '#b45309';
-      ctx.textAlign = 'center';
-      ctx.fillText('TARGET PART ZONE', cx, cy - r - 12);
-      ctx.restore();
-      return;
-    }
+    ctx.save();
+    // Corner target brackets
+    ctx.strokeStyle = result.partDetected ? 'rgba(14, 165, 233, 0.9)' : 'rgba(217, 119, 6, 0.8)';
+    ctx.lineWidth = 4;
+    const cornerSize = 28;
 
-    // 1. Draw Part Oriented Boundary (shows homography lock)
-    if (settings?.drawPartOutline && result.partCorners && result.partCorners.length === 4) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(result.partCorners[0].x, result.partCorners[0].y);
-      for (let i = 1; i < 4; i++) {
-        ctx.lineTo(result.partCorners[i].x, result.partCorners[i].y);
-      }
-      ctx.closePath();
-      ctx.strokeStyle = 'rgba(14, 165, 233, 0.9)';
-      ctx.lineWidth = 3.5;
-      ctx.setLineDash([8, 4]);
-      ctx.stroke();
+    const left = cx - reticleW / 2;
+    const right = cx + reticleW / 2;
+    const top = cy - reticleH / 2;
+    const bottom = cy + reticleH / 2;
 
-      ctx.fillStyle = 'rgba(14, 165, 233, 0.08)';
-      ctx.fill();
-      ctx.restore();
-    }
+    // Top-Left
+    ctx.beginPath();
+    ctx.moveTo(left, top + cornerSize);
+    ctx.lineTo(left, top);
+    ctx.lineTo(left + cornerSize, top);
+    ctx.stroke();
 
-    // 2. Draw Sleeve Indicators: Green Circles (Present) & Red Circles (Missing)
+    // Top-Right
+    ctx.beginPath();
+    ctx.moveTo(right - cornerSize, top);
+    ctx.lineTo(right, top);
+    ctx.lineTo(right, top + cornerSize);
+    ctx.stroke();
+
+    // Bottom-Left
+    ctx.beginPath();
+    ctx.moveTo(left, bottom - cornerSize);
+    ctx.lineTo(left, bottom);
+    ctx.lineTo(left + cornerSize, bottom);
+    ctx.stroke();
+
+    // Bottom-Right
+    ctx.beginPath();
+    ctx.moveTo(right - cornerSize, bottom);
+    ctx.lineTo(right, bottom);
+    ctx.lineTo(right, bottom - cornerSize);
+    ctx.stroke();
+
+    // Subtle guide text
+    ctx.font = 'bold 13px sans-serif';
+    ctx.fillStyle = result.partDetected ? 'rgba(14, 165, 233, 0.95)' : 'rgba(217, 119, 6, 0.95)';
+    ctx.textAlign = 'center';
+    ctx.fillText(result.partDetected ? 'PART DETECTED • 3-SLEEVE SCAN' : 'ALIGN 3-SLEEVE PART HERE', cx, top - 12);
+    ctx.restore();
+
+    // Draw Sleeves
     result.sleeves.forEach((sleeve, idx) => {
       const { x, y, radius, present } = sleeve;
       const isOk = present;
 
       ctx.save();
-      const circleRadius = Math.max(18, radius);
+      const circleRadius = Math.max(22, radius);
 
-      // Outer halo
+      // Outer glow
       ctx.beginPath();
-      ctx.arc(x, y, circleRadius + 6, 0, Math.PI * 2);
-      ctx.strokeStyle = isOk ? 'rgba(16, 185, 129, 0.4)' : 'rgba(239, 68, 68, 0.7)';
-      ctx.lineWidth = isOk ? 3 : 5;
+      ctx.arc(x, y, circleRadius + 7, 0, Math.PI * 2);
+      ctx.strokeStyle = isOk ? 'rgba(16, 185, 129, 0.45)' : 'rgba(239, 68, 68, 0.8)';
+      ctx.lineWidth = 4;
       ctx.stroke();
 
-      // Main Circle: GREEN for PRESENT, RED for MISSING
+      // Main Circle
       ctx.beginPath();
       ctx.arc(x, y, circleRadius, 0, Math.PI * 2);
       ctx.strokeStyle = isOk ? '#059669' : '#dc2626';
-      ctx.lineWidth = isOk ? 4.5 : 5.5;
-      ctx.fillStyle = isOk ? 'rgba(16, 185, 129, 0.22)' : 'rgba(239, 68, 68, 0.35)';
+      ctx.lineWidth = 5;
+      ctx.fillStyle = isOk ? 'rgba(16, 185, 129, 0.28)' : 'rgba(239, 68, 68, 0.45)';
       ctx.fill();
       ctx.stroke();
 
@@ -235,21 +275,21 @@ export default function InspectionView({
       ctx.font = `bold ${Math.round(circleRadius * 0.9)}px sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = isOk ? '#047857' : '#b91c1c';
+      ctx.fillStyle = '#ffffff';
       ctx.fillText(isOk ? '✓' : '✕', x, y);
 
-      // Status Pill Tag
-      ctx.font = 'bold 12px sans-serif';
+      // Status Tag
+      ctx.font = 'bold 13px sans-serif';
       const label = isOk ? `Sleeve #${idx + 1} OK` : `Sleeve #${idx + 1} MISSING`;
       const textWidth = ctx.measureText(label).width;
 
-      const tagY = y - circleRadius - 16;
+      const tagY = y - circleRadius - 18;
       ctx.fillStyle = isOk ? '#059669' : '#dc2626';
-      ctx.fillRect(x - textWidth / 2 - 6, tagY - 10, textWidth + 12, 20);
+      ctx.fillRect(x - textWidth / 2 - 8, tagY - 11, textWidth + 16, 22);
 
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 1.5;
-      ctx.strokeRect(x - textWidth / 2 - 6, tagY - 10, textWidth + 12, 20);
+      ctx.strokeRect(x - textWidth / 2 - 8, tagY - 11, textWidth + 16, 22);
 
       ctx.fillStyle = '#ffffff';
       ctx.fillText(label, x, tagY);
@@ -259,173 +299,186 @@ export default function InspectionView({
   };
 
   const status = inspectionResult.status;
-  const presentCount = inspectionResult.sleeves.filter(s => s.present).length;
+  const presentCount = inspectionResult.sleeves.filter((s) => s.present).length;
 
   return (
-    <div className="flex-1 flex flex-col bg-slate-100 text-slate-900 relative select-none">
-      {/* 1. ULTRA HIGH-VISIBILITY RESULT BANNER (Visible from distance) */}
-      <div
-        className={`w-full py-4 sm:py-5 px-4 transition-all duration-300 shadow-md flex flex-col items-center justify-center text-center ${
-          status === 'PASS'
-            ? 'bg-emerald-600 text-white shadow-emerald-600/30'
-            : status === 'FAIL'
-            ? 'bg-red-600 text-white animate-pulse-fast shadow-red-600/40'
-            : status === 'SEARCHING'
-            ? 'bg-amber-500 text-white shadow-amber-500/20'
-            : 'bg-white text-slate-800 border-b border-slate-200'
+    <div
+      ref={containerRef}
+      className="relative flex-1 w-full h-full bg-black overflow-hidden flex flex-col select-none"
+    >
+      {/* 1. TRUE EDGE-TO-EDGE FULL SCREEN CAMERA FEED */}
+      <video
+        ref={videoRef}
+        playsInline
+        muted
+        autoPlay
+        className={`absolute inset-0 w-full h-full object-cover z-0 ${
+          isSimulating ? 'hidden' : 'block'
         }`}
-      >
-        <div className="flex items-center space-x-3">
-          {status === 'PASS' && <CheckCircle className="w-10 h-10 sm:w-12 sm:h-12 text-white animate-bounce" />}
-          {status === 'FAIL' && <AlertTriangle className="w-10 h-10 sm:w-12 sm:h-12 text-white animate-pulse" />}
-          {status === 'SEARCHING' && <RefreshCw className="w-8 h-8 sm:w-10 sm:h-10 text-white animate-spin" />}
-          {status === 'IDLE' && <Zap className="w-8 h-8 text-indigo-600" />}
+      />
 
-          {/* LARGE RESULT TEXT */}
-          <span className="text-4xl sm:text-6xl font-black tracking-wider drop-shadow-sm">
-            {status === 'PASS' ? 'PASS' : status === 'FAIL' ? 'FAIL' : status === 'SEARCHING' ? 'ALIGNING...' : 'READY'}
-          </span>
+      {/* Virtual Simulator Canvas (if simulating) */}
+      {isSimulating && (
+        <div className="absolute inset-0 w-full h-full flex items-center justify-center bg-slate-900 z-0">
+          <div className="text-white text-xs font-bold bg-indigo-600/90 px-3 py-1.5 rounded-full absolute top-4 left-4 z-20 shadow">
+            ● Virtual Test Bench Stream Active (3 Sleeves)
+          </div>
         </div>
+      )}
 
-        {/* Status Subtitle Banner */}
-        <p className="text-sm sm:text-base font-bold tracking-wide mt-1 drop-shadow-sm uppercase opacity-95">
-          {status === 'PASS'
-            ? `PASS - All ${totalTargetSleeves} Sleeves Present (${presentCount}/${totalTargetSleeves})`
-            : status === 'FAIL'
-            ? `FAIL - Missing Sleeve Detected (${inspectionResult.missingCount} of ${totalTargetSleeves} Missing)`
-            : status === 'SEARCHING'
-            ? `Point camera toward part • Target: ${totalTargetSleeves} Metal Sleeves`
-            : 'Press "Start Inspection" to open camera'}
-        </p>
-      </div>
+      {/* HUD Overlay Canvas (Positioned exactly over video) */}
+      <canvas
+        ref={overlayCanvasRef}
+        className="absolute inset-0 w-full h-full object-cover pointer-events-none z-10"
+      />
 
-      {/* 2. CAMERA / VIDEO FEED AREA (Bright industrial frame, full screen mobile) */}
-      <div className="relative flex-1 bg-slate-200 border-y border-slate-300 flex items-center justify-center overflow-hidden min-h-[380px]">
-        {/* Live Camera Stream */}
-        <video
-          ref={videoRef}
-          playsInline
-          muted
-          autoPlay
-          className={`absolute inset-0 w-full h-full object-contain ${
-            isSimulating ? 'hidden' : 'block'
+      {/* Fast Scanline Effect */}
+      {isInspecting && <div className="scanline-effect z-10" />}
+
+      {/* 2. FLOATING TOP RESULT BANNER (Heads-Up Display) */}
+      <div className="absolute top-3 left-3 right-3 z-30 flex flex-col items-center pointer-events-none">
+        <div
+          className={`w-full max-w-xl py-3 px-4 rounded-2xl transition-all duration-200 shadow-2xl flex items-center justify-between pointer-events-auto backdrop-blur-md ${
+            status === 'PASS'
+              ? 'bg-emerald-600/95 text-white border-2 border-emerald-300'
+              : status === 'FAIL'
+              ? 'bg-red-600/95 text-white border-2 border-red-300 animate-pulse-fast'
+              : status === 'SEARCHING'
+              ? 'bg-amber-500/95 text-white border-2 border-amber-200'
+              : 'bg-white/95 text-slate-800 border border-slate-200 shadow-lg'
           }`}
-        />
+        >
+          <div className="flex items-center space-x-3">
+            {status === 'PASS' && <CheckCircle className="w-8 h-8 sm:w-10 sm:h-10 text-white animate-bounce shrink-0" />}
+            {status === 'FAIL' && <AlertTriangle className="w-8 h-8 sm:w-10 sm:h-10 text-white animate-pulse shrink-0" />}
+            {status === 'SEARCHING' && <RefreshCw className="w-7 h-7 sm:w-8 sm:h-8 text-white animate-spin shrink-0" />}
+            {status === 'IDLE' && <Zap className="w-7 h-7 text-indigo-600 shrink-0" />}
 
-        {/* Virtual Simulator Canvas (if running in test simulation mode) */}
-        {isSimulating && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <div className="absolute top-3 left-3 bg-white/95 border border-indigo-300 text-indigo-800 text-xs font-bold px-3 py-1.5 rounded-lg shadow-md z-20 flex items-center space-x-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span>Virtual Test Bench Stream Active (3 Sleeves)</span>
+            <div>
+              <span className="text-2xl sm:text-4xl font-black tracking-wider drop-shadow-sm block leading-tight">
+                {status === 'PASS' ? 'PASS' : status === 'FAIL' ? 'FAIL' : status === 'SEARCHING' ? 'SCANNING...' : 'READY'}
+              </span>
+              <span className="text-xs sm:text-sm font-bold opacity-95 block">
+                {status === 'PASS'
+                  ? `All ${totalTargetSleeves} Sleeves Present (${presentCount}/${totalTargetSleeves})`
+                  : status === 'FAIL'
+                  ? `Missing Sleeve Detected (${inspectionResult.missingCount} Missing)`
+                  : status === 'SEARCHING'
+                  ? 'Quick Scan Active • Point at Part'
+                  : 'Press "Start Inspection" for Fullscreen Camera'}
+              </span>
             </div>
           </div>
-        )}
 
-        {/* Scanline Animation while Inspecting */}
-        {isInspecting && <div className="scanline-effect z-10" />}
+          {/* Quick HUD Action Buttons */}
+          <div className="flex items-center space-x-1.5">
+            <button
+              onClick={toggleMute}
+              className={`p-2 rounded-xl border transition ${
+                isMuted ? 'bg-rose-100 text-rose-700 border-rose-300' : 'bg-white/80 text-slate-700 border-slate-200'
+              }`}
+              title={isMuted ? 'Unmute' : 'Mute'}
+            >
+              {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+            </button>
+            <button
+              onClick={toggleFullscreen}
+              className="p-2 rounded-xl bg-white/80 text-slate-700 border border-slate-200 hover:bg-white transition"
+              title="Toggle Fullscreen"
+            >
+              {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+            </button>
+          </div>
+        </div>
+      </div>
 
-        {/* Canvas Overlay for Computer Vision (Circles & Bounding Box) */}
-        <canvas
-          ref={overlayCanvasRef}
-          className="absolute inset-0 w-full h-full object-contain pointer-events-none z-10"
-        />
-
-        {/* Idle / Error Placeholders */}
-        {!isInspecting && !isCameraActive && !isSimulating && (
-          <div className="z-10 flex flex-col items-center justify-center p-6 text-center max-w-md bg-white/95 border border-slate-300 rounded-2xl shadow-xl m-4">
-            <div className="h-16 px-4 py-2 rounded-2xl bg-white border border-slate-200 flex items-center justify-center mb-4 shadow-sm">
+      {/* 3. IDLE WELCOME CARD (Shown when camera not yet opened) */}
+      {!isInspecting && !isCameraActive && !isSimulating && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+          <div className="flex flex-col items-center justify-center p-6 text-center max-w-sm w-full bg-white rounded-3xl shadow-2xl border border-slate-200">
+            <div className="h-16 px-4 py-2 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-center mb-4 shadow-sm">
               <img
                 src="/radiance-polymer-logo.png"
                 alt="Radiance Polymer Logo"
                 className="h-12 w-auto max-w-[160px] object-contain"
               />
             </div>
-            <h3 className="text-xl font-black text-slate-900 mb-1">Radiance Polymer Quality Inspection</h3>
-            <p className="text-xs font-bold text-indigo-700 uppercase tracking-wider mb-2">Metal Sleeve Verification System</p>
-            <p className="text-sm text-slate-600 mb-5 leading-relaxed">
-              Target configuration: <strong>{totalTargetSleeves} metal sleeves</strong>. Point camera at the injection molded part and press Start Inspection.
+            <h3 className="text-xl font-black text-slate-900 mb-1">Radiance Polymer Inspection</h3>
+            <p className="text-xs font-bold text-indigo-700 uppercase tracking-wider mb-2">
+              Full-Screen Quick Scanner (3 Sleeves)
             </p>
-            <div className="flex flex-wrap gap-2.5 justify-center">
-              <button
-                onClick={handleStartInspection}
-                className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm shadow-md shadow-emerald-600/20 transition cursor-pointer flex items-center space-x-2"
-              >
-                <Play className="w-4 h-4 fill-current" />
-                <span>Start Inspection</span>
-              </button>
-              <button
-                onClick={onOpenSimulator}
-                className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm shadow-md shadow-indigo-600/20 transition cursor-pointer"
-              >
-                Open Virtual Test Bench
-              </button>
-            </div>
-          </div>
-        )}
+            <p className="text-xs text-slate-500 mb-5 leading-relaxed">
+              Opens full-screen mobile camera with real-time detection of metal sleeves and missing sleeve audio alarms.
+            </p>
 
-        {/* Camera Permission / Access Error */}
-        {cameraError && (
-          <div className="absolute top-4 left-4 right-4 z-20 p-4 rounded-xl bg-rose-50 border border-rose-300 text-rose-800 text-sm flex items-center space-x-3 shadow-lg">
-            <AlertCircle className="w-6 h-6 text-rose-600 shrink-0" />
-            <div>
-              <span className="font-bold block">Camera Error</span>
-              <span>{cameraError}</span>
-            </div>
-          </div>
-        )}
+            <button
+              onClick={handleStartInspection}
+              className="w-full py-3.5 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-base shadow-lg shadow-emerald-600/30 transition flex items-center justify-center space-x-2 cursor-pointer active:scale-95 mb-2.5"
+            >
+              <Camera className="w-5 h-5" />
+              <span>Open Full-Screen Camera</span>
+            </button>
 
-        {/* On-Screen Fast Status Corner */}
-        {isInspecting && (
-          <div className="absolute bottom-3 left-3 z-20 flex flex-col space-y-1">
-            <div className="bg-white/90 backdrop-blur border border-slate-300 rounded-lg px-2.5 py-1 text-xs font-semibold text-slate-700 shadow-sm">
-              Part Tracking: <span className={inspectionResult.partDetected ? 'text-emerald-700 font-bold' : 'text-amber-700'}>
-                {inspectionResult.partDetected ? 'LOCKED ON' : 'SEARCHING'}
-              </span>
-            </div>
-            {inspectionResult.partDetected && (
-              <div className="bg-white/90 backdrop-blur border border-slate-300 rounded-lg px-2.5 py-1 text-xs font-semibold text-slate-700 shadow-sm">
-                Sleeves: <span className="text-emerald-700 font-bold">{presentCount} of {totalTargetSleeves} OK</span>
-                {inspectionResult.missingCount > 0 && (
-                  <span className="text-red-600 font-bold ml-1.5">
-                    ({inspectionResult.missingCount} Missing)
-                  </span>
-                )}
-              </div>
-            )}
+            <button
+              onClick={onOpenSimulator}
+              className="w-full py-2.5 px-4 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs border border-indigo-200 transition cursor-pointer"
+            >
+              Open Virtual Test Bench
+            </button>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      {/* 3. FOOTER ACTION BUTTONS (Bright Touch Buttons for Shop Floor) */}
-      <div className="p-3 sm:p-4 bg-white border-t border-slate-200 shadow-lg z-20">
-        <div className="max-w-4xl mx-auto grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3">
-          {/* Start Inspection Button */}
+      {/* Camera Error Message */}
+      {cameraError && (
+        <div className="absolute top-20 left-4 right-4 z-40 p-4 rounded-2xl bg-rose-50 border-2 border-rose-400 text-rose-900 text-xs shadow-2xl flex items-center space-x-3">
+          <AlertCircle className="w-6 h-6 text-rose-600 shrink-0" />
+          <div>
+            <span className="font-bold block">Camera Error</span>
+            <span>{cameraError}</span>
+          </div>
+        </div>
+      )}
+
+      {/* 4. FLOATING BOTTOM CONTROL BAR */}
+      <div className="absolute bottom-4 left-3 right-3 z-30 flex justify-center pointer-events-none">
+        <div className="w-full max-w-xl p-2.5 sm:p-3 rounded-2xl bg-white/95 backdrop-blur-md border border-slate-200 shadow-2xl flex items-center justify-between gap-2 pointer-events-auto">
+          {/* Quick Scan One-Tap Button */}
           <button
-            onClick={handleStartInspection}
-            disabled={isInspecting}
-            className={`flex items-center justify-center space-x-2 py-3.5 px-4 rounded-xl font-black text-base shadow-sm transition active:scale-95 cursor-pointer ${
-              isInspecting
-                ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
-                : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-600/20'
-            }`}
+            onClick={handleQuickScanNow}
+            className="flex-1 flex items-center justify-center space-x-1.5 py-3 px-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs sm:text-sm shadow-sm transition active:scale-95 cursor-pointer"
           >
-            <Play className="w-5 h-5 fill-current" />
-            <span>Start Inspection</span>
+            <Scan className="w-4 h-4" />
+            <span>Quick Scan</span>
           </button>
 
-          {/* Stop Inspection Button */}
+          {/* Start/Stop Toggle Button */}
+          {isInspecting ? (
+            <button
+              onClick={handleStopInspection}
+              className="flex-1 flex items-center justify-center space-x-1.5 py-3 px-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-black text-xs sm:text-sm shadow-sm transition active:scale-95 cursor-pointer"
+            >
+              <Square className="w-4 h-4 fill-current" />
+              <span>Stop</span>
+            </button>
+          ) : (
+            <button
+              onClick={handleStartInspection}
+              className="flex-1 flex items-center justify-center space-x-1.5 py-3 px-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs sm:text-sm shadow-sm transition active:scale-95 cursor-pointer"
+            >
+              <Play className="w-4 h-4 fill-current" />
+              <span>Live Inspect</span>
+            </button>
+          )}
+
+          {/* Flip Camera Button */}
           <button
-            onClick={handleStopInspection}
-            disabled={!isInspecting}
-            className={`flex items-center justify-center space-x-2 py-3.5 px-4 rounded-xl font-black text-base shadow-sm transition active:scale-95 cursor-pointer ${
-              !isInspecting
-                ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
-                : 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-600/20'
-            }`}
+            onClick={switchCamera}
+            disabled={!isCameraActive || isSimulating}
+            className="p-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition active:scale-95 cursor-pointer disabled:opacity-40"
+            title="Switch Front/Rear Camera"
           >
-            <Square className="w-5 h-5 fill-current" />
-            <span>Stop Inspection</span>
+            <RefreshCw className="w-4 h-4" />
           </button>
 
           {/* Master Setup Button */}
@@ -434,20 +487,19 @@ export default function InspectionView({
               handleStopInspection();
               onOpenMasterSetup();
             }}
-            className="flex items-center justify-center space-x-2 py-3.5 px-4 rounded-xl bg-slate-50 hover:bg-slate-100 text-indigo-700 border border-slate-300 font-bold text-sm shadow-sm transition active:scale-95 cursor-pointer"
+            className="p-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-indigo-700 border border-slate-200 transition active:scale-95 cursor-pointer"
+            title="Master Setup"
           >
-            <Wrench className="w-5 h-5" />
-            <span>Master Setup</span>
+            <Wrench className="w-4 h-4" />
           </button>
 
-          {/* Camera Switcher (Flip Front/Rear) */}
+          {/* Fullscreen Button */}
           <button
-            onClick={switchCamera}
-            disabled={!isCameraActive || isSimulating}
-            className="flex items-center justify-center space-x-2 py-3.5 px-4 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-800 border border-slate-300 font-bold text-sm shadow-sm transition active:scale-95 cursor-pointer disabled:opacity-50"
+            onClick={toggleFullscreen}
+            className="p-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition active:scale-95 cursor-pointer"
+            title="Toggle Fullscreen"
           >
-            <RefreshCw className="w-5 h-5" />
-            <span>Switch Camera</span>
+            {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
           </button>
         </div>
       </div>
