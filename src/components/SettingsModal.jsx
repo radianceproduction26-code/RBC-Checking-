@@ -102,24 +102,84 @@ export default function SettingsModal({
             </p>
           </div>
 
-          {/* Inspection Speed / Throttle */}
-          <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
-            <div className="flex justify-between">
-              <span className="font-bold text-slate-800">Frame Processing Interval</span>
-              <span className="font-mono font-bold text-indigo-600">{current.inspectionIntervalMs} ms</span>
+          {/* Scan Mode & Cadence */}
+          <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
+            <div>
+              <span className="font-bold text-slate-800 block mb-1">Inspection Mode</span>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleChange('scanMode', 'auto_lock')}
+                  className={`py-1.5 px-2 rounded-lg text-center font-bold transition cursor-pointer border ${
+                    current.scanMode === 'auto_lock'
+                      ? 'bg-indigo-600 text-white border-indigo-600'
+                      : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                  }`}
+                >
+                  Auto-Lock
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleChange('scanMode', 'manual')}
+                  className={`py-1.5 px-2 rounded-lg text-center font-bold transition cursor-pointer border ${
+                    current.scanMode === 'manual'
+                      ? 'bg-indigo-600 text-white border-indigo-600'
+                      : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                  }`}
+                >
+                  Tap to Scan
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleChange('scanMode', 'continuous')}
+                  className={`py-1.5 px-2 rounded-lg text-center font-bold transition cursor-pointer border ${
+                    current.scanMode === 'continuous'
+                      ? 'bg-indigo-600 text-white border-indigo-600'
+                      : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                  }`}
+                >
+                  Continuous
+                </button>
+              </div>
             </div>
-            <input
-              type="range"
-              min="60"
-              max="350"
-              step="20"
-              value={current.inspectionIntervalMs}
-              onChange={(e) => handleChange('inspectionIntervalMs', parseInt(e.target.value, 10))}
-              className="w-full accent-indigo-600 cursor-pointer"
-            />
-            <p className="text-[11px] text-slate-500">
-              Controls CPU / battery usage on mobile shop-floor devices (~8 to 15 FPS).
-            </p>
+
+            <div>
+              <div className="flex justify-between mb-1">
+                <span className="font-bold text-slate-800">Scan Cadence (Interval)</span>
+                <span className="font-mono font-bold text-indigo-600">{current.inspectionIntervalMs || 220} ms</span>
+              </div>
+              <input
+                type="range"
+                min="100"
+                max="400"
+                step="20"
+                value={current.inspectionIntervalMs || 220}
+                onChange={(e) => handleChange('inspectionIntervalMs', parseInt(e.target.value, 10))}
+                className="w-full accent-indigo-600 cursor-pointer"
+              />
+              <p className="text-[11px] text-slate-500">
+                Calibrated 200–250ms prevents frantic scanning and stabilizes operator camera motion.
+              </p>
+            </div>
+
+            <div>
+              <div className="flex justify-between mb-1">
+                <span className="font-bold text-slate-800">Verdict Hold Duration</span>
+                <span className="font-mono font-bold text-indigo-600">{((current.lockDurationMs || 2500) / 1000).toFixed(1)} s</span>
+              </div>
+              <input
+                type="range"
+                min="1500"
+                max="5000"
+                step="250"
+                value={current.lockDurationMs || 2500}
+                onChange={(e) => handleChange('lockDurationMs', parseInt(e.target.value, 10))}
+                className="w-full accent-indigo-600 cursor-pointer"
+              />
+              <p className="text-[11px] text-slate-500">
+                Time the screen freezes and displays the PASS/FAIL verdict solid before readying next part.
+              </p>
+            </div>
           </div>
 
           {/* Audio Alarm Test */}

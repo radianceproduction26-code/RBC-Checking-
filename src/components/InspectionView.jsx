@@ -2,8 +2,10 @@ import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { 
   Play, Square, RefreshCw, AlertTriangle, CheckCircle, 
   Wrench, Camera, Zap, AlertCircle, Maximize2, Minimize2, 
-  Scan, Sparkles, Volume2, VolumeX, Bug
+  Scan, Sparkles, Volume2, VolumeX, Bug, Lock, ArrowRight,
+  RotateCcw, Sliders, Check, ShieldCheck, Timer
 } from 'lucide-react';
+import confetti from 'canvas-confetti';
 import DebugPanel from './DebugPanel';
 
 export default function InspectionView({
@@ -27,12 +29,38 @@ export default function InspectionView({
     error: cameraError,
   } = useCameraHook;
 
-  const { startAlarm, stopAlarm, initAudio, isMuted, toggleMute } = useAudioAlertHook;
+  const { 
+    startAlarm, 
+    stopAlarm, 
+    triggerSingleBeep,
+    triggerPassChime, 
+    triggerFailBuzz, 
+    initAudio, 
+    isMuted, 
+    toggleMute 
+  } = useAudioAlertHook;
+
+  // Scan Modes: 'auto_lock' | 'manual' | 'continuous'
+  const [scanMode, setScanMode] = useState(settings?.scanMode || 'auto_lock');
+  const [scanSpeedMs, setScanSpeedMs] = useState(settings?.inspectionIntervalMs || 220);
+  const [lockDurationMs, setLockDurationMs] = useState(settings?.lockDurationMs || 2500);
 
   const [isInspecting, setIsInspecting] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isDebugMode, setIsDebugMode] = useState(false);
   const [activeThreshold, setActiveThreshold] = useState(settings?.sleeveConfidenceThreshold ?? 0.38);
+
+  // Inspection State Machine: 'IDLE' | 'POSITIONING' | 'STABILIZING' | 'LOCKED'
+  const [cycleState, setCycleState] = useState('IDLE');
+  const [lockProgress, setLockProgress] = useState(0); // 0..100% for locked timer bar
+  const [stabilityCounter, setStabilityCounter] = useState(0); // consecutive stable frames
+
+  // Shift QC Statistics
+  const [qcStats, setQcStats] = useState({
+    total: 0,
+    passed: 0,
+    failed: 0,
+  });
 
   const [inspectionResult, setInspectionResult] = useState({
     partDetected: false,
@@ -52,6 +80,9 @@ export default function InspectionView({
   const overlayCanvasRef = useRef(null);
   const animationFrameIdRef = useRef(null);
   const lastProcessTimeRef = useRef(0);
+  const lockTimerRef = useRef(null);
+  const lockStartTimeRef = useRef(0);
+  const stableFramesRequired = settings?.stabilityFrames || 3;
 
   const totalTargetSleeves = masterProfile?.sleeves?.length || 3;
 
@@ -59,28 +90,12 @@ export default function InspectionView({
   useEffect(() => {
     return () => {
       stopAlarm();
-      if (animationFrameIdRef.current) {
-        cancelAnimationFrame(animationFrameIdRef.current);
-      }
+      if (animationFrameIdRef.current) cancelAnimationFrame(animationFrameIdRef.current);
+      if (lockTimerRef.current) clearInterval(lockTimerRef.current);
     };
   }, [stopAlarm]);
 
-  // Audio alarm triggering: 1 missing -> warning beep; 2+ missing -> continuous urgent beep
-  useEffect(() => {
-    if (!isInspecting) {
-      stopAlarm();
-      return;
-    }
-
-    if (inspectionResult.result === 'FAIL' || inspectionResult.status === 'FAIL') {
-      const missing = inspectionResult.missingCount || 1;
-      startAlarm(missing);
-    } else {
-      stopAlarm();
-    }
-  }, [inspectionResult.result, inspectionResult.status, inspectionResult.missingCount, isInspecting, startAlarm, stopAlarm]);
-
-  // Start Inspection flow with full camera activation
+  // Start Inspection flow
   const handleStartInspection = async () => {
     initAudio();
     if (!isSimulating && !isCameraActive) {
@@ -88,6 +103,10 @@ export default function InspectionView({
       if (!ok) return;
     }
     setIsInspecting(true);
+    setCycleState('POSITIONING');
+    setStabilityCounter(0);
+    setLockProgress(0);
+
     setInspectionResult({
       partDetected: false,
       matchedFeatures: 0,
@@ -96,7 +115,7 @@ export default function InspectionView({
       sleeve3: 'unknown',
       result: 'SEARCHING',
       status: 'SEARCHING',
-      message: 'ORB Feature Alignment Active • Point camera at part',
+      message: 'Position PA6-GF50 Part in Target Reticle',
       sleeves: [],
       missingCount: 0,
       debug: {},
@@ -106,10 +125,19 @@ export default function InspectionView({
   // Stop Inspection flow
   const handleStopInspection = () => {
     setIsInspecting(false);
+    setCycleState('IDLE');
+    setStabilityCounter(0);
+    setLockProgress(0);
     stopAlarm();
+
     if (animationFrameIdRef.current) {
       cancelAnimationFrame(animationFrameIdRef.current);
     }
+    if (lockTimerRef.current) {
+      clearInterval(lockTimerRef.current);
+      lockTimerRef.current = null;
+    }
+
     setInspectionResult({
       partDetected: false,
       matchedFeatures: 0,
@@ -131,9 +159,118 @@ export default function InspectionView({
     }
   };
 
-  // Process one frame using requestAnimationFrame()
-  const processCurrentFrame = useCallback(() => {
+  // Unlock and prepare for the next part
+  const unlockAndReadyNextPart = useCallback(() => {
+    if (lockTimerRef.current) {
+      clearInterval(lockTimerRef.current);
+      lockTimerRef.current = null;
+    }
+    setLockProgress(0);
+    setStabilityCounter(0);
+    setCycleState('POSITIONING');
+    stopAlarm();
+
+    setInspectionResult((prev) => ({
+      ...prev,
+      result: 'SEARCHING',
+      status: 'SEARCHING',
+      message: 'Ready for Next Part • Align in Reticle',
+    }));
+  }, [stopAlarm]);
+
+  // Lock a final verdict on screen
+  const lockVerdict = useCallback((evalResult) => {
+    setCycleState('LOCKED');
+    setInspectionResult(evalResult);
+
+    const isPass = evalResult.status === 'PASS' || evalResult.result === 'PASS';
+
+    // Update Statistics
+    setQcStats((prev) => ({
+      total: prev.total + 1,
+      passed: prev.passed + (isPass ? 1 : 0),
+      failed: prev.failed + (isPass ? 0 : 1),
+    }));
+
+    // Trigger Audio Alert once
+    if (isPass) {
+      triggerPassChime();
+      try {
+        confetti({
+          particleCount: 28,
+          spread: 60,
+          origin: { y: 0.2 },
+          colors: ['#10b981', '#059669', '#34d399', '#ffffff'],
+        });
+      } catch (e) {}
+    } else {
+      triggerFailBuzz();
+    }
+
+    // Auto-Lock Timer Countdown Bar
+    if (scanMode === 'auto_lock') {
+      const startTime = performance.now();
+      lockStartTimeRef.current = startTime;
+      if (lockTimerRef.current) clearInterval(lockTimerRef.current);
+
+      lockTimerRef.current = setInterval(() => {
+        const elapsed = performance.now() - lockStartTimeRef.current;
+        const progress = Math.min(100, (elapsed / lockDurationMs) * 100);
+        setLockProgress(progress);
+
+        if (elapsed >= lockDurationMs) {
+          clearInterval(lockTimerRef.current);
+          lockTimerRef.current = null;
+          unlockAndReadyNextPart();
+        }
+      }, 50);
+    }
+  }, [scanMode, lockDurationMs, triggerPassChime, triggerFailBuzz, unlockAndReadyNextPart]);
+
+  // Manual Trigger Scan Execution (One definitive high-confidence snapshot)
+  const handleManualTriggerScan = useCallback(() => {
     if (!cvEngine) return;
+    const sourceElement = isSimulating ? simulatedCanvas : videoRef.current;
+    if (!sourceElement) return;
+
+    try {
+      const activeSettings = {
+        ...settings,
+        sleeveConfidenceThreshold: activeThreshold,
+      };
+      const result = cvEngine.processFrame(sourceElement, activeSettings);
+      if (result) {
+        drawOverlay(result, sourceElement);
+        lockVerdict(result);
+      }
+    } catch (err) {
+      console.warn('Manual scan error:', err);
+    }
+  }, [cvEngine, isSimulating, simulatedCanvas, videoRef, settings, activeThreshold, lockVerdict]);
+
+  // Keyboard shortcut: Spacebar triggers scan or moves to next part
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.code === 'Space' && isInspecting) {
+        e.preventDefault();
+        if (cycleState === 'LOCKED') {
+          unlockAndReadyNextPart();
+        } else {
+          handleManualTriggerScan();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isInspecting, cycleState, unlockAndReadyNextPart, handleManualTriggerScan]);
+
+  // Process one frame according to the state machine
+  const processCurrentFrame = useCallback(() => {
+    if (!cvEngine || !isInspecting) return;
+
+    // Do NOT process frames if currently locked in a verdict hold
+    if (cycleState === 'LOCKED') return;
+
     const sourceElement = isSimulating ? simulatedCanvas : videoRef.current;
     if (!sourceElement) return;
 
@@ -146,43 +283,103 @@ export default function InspectionView({
         ...settings,
         sleeveConfidenceThreshold: activeThreshold,
       };
+
       const result = cvEngine.processFrame(sourceElement, activeSettings);
-      if (result) {
+      if (!result) return;
+
+      drawOverlay(result, sourceElement);
+
+      // Handle Scan Modes:
+      if (scanMode === 'continuous') {
+        // Continuous smooth live scanning
         setInspectionResult(result);
-        drawOverlay(result, sourceElement);
+        setCycleState(result.partDetected ? 'ANALYZING' : 'POSITIONING');
+        return;
+      }
+
+      if (scanMode === 'manual') {
+        // In manual mode, only update reticle guide without locking automatically
+        setInspectionResult({
+          ...result,
+          message: result.partDetected
+            ? 'Part Detected • Press "SCAN PART" to Inspect'
+            : 'Align Part in Reticle • Press "SCAN PART"',
+        });
+        setCycleState(result.partDetected ? 'STABILIZING' : 'POSITIONING');
+        return;
+      }
+
+      // Auto-Lock Cycle:
+      if (scanMode === 'auto_lock') {
+        const partInView = result.partDetected || result.sleeves.some((s) => s.confidence > 25);
+
+        if (partInView) {
+          setStabilityCounter((prev) => {
+            const nextCount = prev + 1;
+            setCycleState('STABILIZING');
+
+            if (nextCount >= stableFramesRequired) {
+              // Stable frame condition met! Lock final verdict.
+              lockVerdict(result);
+              return 0;
+            } else {
+              setInspectionResult({
+                ...result,
+                status: 'SEARCHING',
+                message: `Stabilizing part... (${nextCount}/${stableFramesRequired})`,
+              });
+              return nextCount;
+            }
+          });
+        } else {
+          // Part not in view, reset stability counter
+          setStabilityCounter(0);
+          setCycleState('POSITIONING');
+          setInspectionResult({
+            ...result,
+            status: 'SEARCHING',
+            message: 'Align PA6-GF50 Part in Center Reticle',
+          });
+        }
       }
     } catch (err) {
       console.warn('Scan frame error:', err);
     }
-  }, [cvEngine, isSimulating, simulatedCanvas, videoRef, settings, activeThreshold, isDebugMode]);
+  }, [
+    cvEngine,
+    isInspecting,
+    cycleState,
+    isSimulating,
+    simulatedCanvas,
+    videoRef,
+    settings,
+    activeThreshold,
+    scanMode,
+    stableFramesRequired,
+    lockVerdict,
+  ]);
 
-  // Inspection Loop driven by requestAnimationFrame()
+  // Inspection Loop throttled to calibrated scanSpeedMs (default 220ms)
   const runInspectionLoop = useCallback(() => {
     if (!isInspecting) return;
 
     const now = performance.now();
-    const interval = settings?.inspectionIntervalMs || 60; // 15-20 FPS target
-
-    if (now - lastProcessTimeRef.current >= interval) {
+    if (now - lastProcessTimeRef.current >= scanSpeedMs) {
       lastProcessTimeRef.current = now;
       processCurrentFrame();
     }
 
     animationFrameIdRef.current = requestAnimationFrame(runInspectionLoop);
-  }, [isInspecting, settings, processCurrentFrame]);
+  }, [isInspecting, scanSpeedMs, processCurrentFrame]);
 
   useEffect(() => {
     if (isInspecting) {
       animationFrameIdRef.current = requestAnimationFrame(runInspectionLoop);
     } else {
-      if (animationFrameIdRef.current) {
-        cancelAnimationFrame(animationFrameIdRef.current);
-      }
+      if (animationFrameIdRef.current) cancelAnimationFrame(animationFrameIdRef.current);
     }
     return () => {
-      if (animationFrameIdRef.current) {
-        cancelAnimationFrame(animationFrameIdRef.current);
-      }
+      if (animationFrameIdRef.current) cancelAnimationFrame(animationFrameIdRef.current);
     };
   }, [isInspecting, runInspectionLoop]);
 
@@ -195,7 +392,7 @@ export default function InspectionView({
     }
   };
 
-  // Draw HUD Overlays, Homography Polygon, and Debug Info
+  // Draw HUD Overlays, Alignment Crosshair, and Sleeve Rings
   const drawOverlay = (result, source) => {
     const canvas = overlayCanvasRef.current;
     if (!canvas) return;
@@ -224,134 +421,106 @@ export default function InspectionView({
         ctx.lineTo(corners[i].x, corners[i].y);
       }
       ctx.closePath();
-      ctx.strokeStyle = 'rgba(14, 165, 233, 0.95)';
-      ctx.lineWidth = 4;
-      ctx.setLineDash([8, 4]);
-      ctx.stroke();
-
-      ctx.fillStyle = 'rgba(14, 165, 233, 0.12)';
-      ctx.fill();
-
-      // Label on top of bounding box
-      ctx.font = 'bold 12px sans-serif';
-      ctx.fillStyle = '#0284c7';
-      ctx.fillText('HOMOGRAPHY ALIGNED PART', corners[0].x, corners[0].y - 8);
-      ctx.restore();
-    } else if (!result.partDetected) {
-      // Draw Search Reticle when searching for part
-      const reticleW = Math.min(canvas.width, canvas.height) * 0.75;
-      const reticleH = reticleW * 0.7;
-
-      ctx.save();
-      ctx.strokeStyle = 'rgba(217, 119, 6, 0.85)';
+      ctx.strokeStyle = cycleState === 'LOCKED' 
+        ? (result.status === 'PASS' ? 'rgba(16, 185, 129, 0.95)' : 'rgba(239, 68, 68, 0.95)')
+        : 'rgba(14, 165, 233, 0.9)';
       ctx.lineWidth = 3.5;
-      const cornerSize = 28;
-
-      const left = cx - reticleW / 2;
-      const right = cx + reticleW / 2;
-      const top = cy - reticleH / 2;
-      const bottom = cy + reticleH / 2;
-
-      // Reticle corner brackets
-      ctx.beginPath();
-      ctx.moveTo(left, top + cornerSize); ctx.lineTo(left, top); ctx.lineTo(left + cornerSize, top);
-      ctx.moveTo(right - cornerSize, top); ctx.lineTo(right, top); ctx.lineTo(right, top + cornerSize);
-      ctx.moveTo(left, bottom - cornerSize); ctx.lineTo(left, bottom); ctx.lineTo(left + cornerSize, bottom);
-      ctx.moveTo(right - cornerSize, bottom); ctx.lineTo(right, bottom); ctx.lineTo(right, bottom - cornerSize);
       ctx.stroke();
 
-      ctx.font = 'bold 13px sans-serif';
+      ctx.fillStyle = cycleState === 'LOCKED'
+        ? (result.status === 'PASS' ? 'rgba(16, 185, 129, 0.08)' : 'rgba(239, 68, 68, 0.08)')
+        : 'rgba(14, 165, 233, 0.08)';
+      ctx.fill();
+      ctx.restore();
+    } else if (!result.partDetected && cycleState !== 'LOCKED') {
+      // Draw Circular Industrial Reticle for Hub Placement
+      const reticleR = Math.min(canvas.width, canvas.height) * 0.22;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(217, 119, 6, 0.75)';
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([8, 6]);
+      ctx.beginPath();
+      ctx.arc(cx, cy, reticleR, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Center crosshair
+      ctx.beginPath();
+      ctx.moveTo(cx - 16, cy); ctx.lineTo(cx + 16, cy);
+      ctx.moveTo(cx, cy - 16); ctx.lineTo(cx, cy + 16);
+      ctx.strokeStyle = 'rgba(217, 119, 6, 0.9)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.font = 'bold 12px sans-serif';
       ctx.fillStyle = 'rgba(217, 119, 6, 0.95)';
       ctx.textAlign = 'center';
-      ctx.fillText('POINT CAMERA AT PLASTIC PART', cx, top - 12);
+      ctx.fillText('ALIGN MOTOR HUB IN CENTER', cx, cy + reticleR + 24);
       ctx.restore();
     }
 
-    // 2. DEBUG MODE: Draw Detected ORB Keypoints as Neon Dots
-    if (isDebugMode && result.debug?.keypoints && result.debug.keypoints.length > 0) {
-      ctx.save();
-      for (const kp of result.debug.keypoints) {
-        ctx.beginPath();
-        ctx.arc(kp.x, kp.y, 3, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(234, 179, 8, 0.85)';
-        ctx.fill();
-      }
-      ctx.restore();
-    }
-
-    // 3. Draw Sleeve Inspection Regions (Position A, B, C)
+    // 2. Draw Sleeve Inspection Regions (Position 1, 2, 3)
     result.sleeves.forEach((sleeve, idx) => {
       const { x, y, radius, present } = sleeve;
       const isOk = present;
 
       ctx.save();
-      const circleRadius = Math.max(22, radius);
+      const circleRadius = Math.max(20, radius);
 
       // Outer glow
       ctx.beginPath();
-      ctx.arc(x, y, circleRadius + 7, 0, Math.PI * 2);
-      ctx.strokeStyle = isOk ? 'rgba(16, 185, 129, 0.45)' : 'rgba(239, 68, 68, 0.85)';
-      ctx.lineWidth = 4;
+      ctx.arc(x, y, circleRadius + 6, 0, Math.PI * 2);
+      ctx.strokeStyle = isOk ? 'rgba(16, 185, 129, 0.5)' : 'rgba(239, 68, 68, 0.8)';
+      ctx.lineWidth = 3.5;
       ctx.stroke();
 
       // Main Circle: GREEN for PRESENT, RED for MISSING
       ctx.beginPath();
       ctx.arc(x, y, circleRadius, 0, Math.PI * 2);
       ctx.strokeStyle = isOk ? '#059669' : '#dc2626';
-      ctx.lineWidth = 5;
-      ctx.fillStyle = isOk ? 'rgba(16, 185, 129, 0.28)' : 'rgba(239, 68, 68, 0.45)';
+      ctx.lineWidth = 4;
+      ctx.fillStyle = isOk ? 'rgba(16, 185, 129, 0.25)' : 'rgba(239, 68, 68, 0.35)';
       ctx.fill();
       ctx.stroke();
 
       // Center Icon
-      ctx.font = `bold ${Math.round(circleRadius * 0.9)}px sans-serif`;
+      ctx.font = `bold ${Math.round(circleRadius * 0.85)}px sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#ffffff';
       ctx.fillText(isOk ? '✓' : '✕', x, y);
 
-      // Status Tag with Confidence & Position Name
-      ctx.font = 'bold 12px sans-serif';
-      const posName = sleeve.name || `Position ${String.fromCharCode(65 + idx)}`;
+      // Status Tag
+      ctx.font = 'bold 11px sans-serif';
+      const posName = sleeve.name || `Sleeve ${idx + 1}`;
       const confText = sleeve.confidence !== undefined ? ` (${sleeve.confidence}%)` : '';
       const label = isOk ? `${posName}: OK${confText}` : `${posName}: MISSING${confText}`;
       const textWidth = ctx.measureText(label).width;
 
-      const tagY = y - circleRadius - 18;
+      const tagY = y - circleRadius - 16;
       ctx.fillStyle = isOk ? '#059669' : '#dc2626';
-      ctx.fillRect(x - textWidth / 2 - 8, tagY - 11, textWidth + 16, 22);
+      ctx.fillRect(x - textWidth / 2 - 6, tagY - 10, textWidth + 12, 20);
 
       ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(x - textWidth / 2 - 8, tagY - 11, textWidth + 16, 22);
+      ctx.lineWidth = 1.2;
+      ctx.strokeRect(x - textWidth / 2 - 6, tagY - 10, textWidth + 12, 20);
 
       ctx.fillStyle = '#ffffff';
       ctx.fillText(label, x, tagY);
-
-      // In Debug Mode: display individual metric pill below sleeve
-      if (isDebugMode && sleeve.metrics) {
-        ctx.font = 'bold 10px monospace';
-        const metricStr = `B:${Math.round(sleeve.metrics.metalBrightness * 100)} E:${Math.round(sleeve.metrics.edgeDensity * 100)} C:${Math.round(sleeve.metrics.circularGeometry * 100)}`;
-        const mWidth = ctx.measureText(metricStr).width;
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
-        ctx.fillRect(x - mWidth / 2 - 4, y + circleRadius + 6, mWidth + 8, 16);
-        ctx.fillStyle = '#f8fafc';
-        ctx.fillText(metricStr, x, y + circleRadius + 18);
-      }
-
       ctx.restore();
     });
   };
 
-  const status = inspectionResult.result || inspectionResult.status;
+  const isLocked = cycleState === 'LOCKED';
+  const status = isLocked ? inspectionResult.status : (cycleState === 'STABILIZING' ? 'STABILIZING' : inspectionResult.status);
   const presentCount = inspectionResult.sleeves.filter((s) => s.present).length;
 
   return (
     <div
       ref={containerRef}
-      className="relative flex-1 w-full h-full bg-black overflow-hidden flex flex-col select-none"
+      className="relative flex-1 w-full h-full bg-slate-950 overflow-hidden flex flex-col select-none"
     >
-      {/* 1. TRUE EDGE-TO-EDGE FULL SCREEN CAMERA FEED */}
+      {/* 1. Camera Video Feed */}
       <video
         ref={videoRef}
         playsInline
@@ -362,11 +531,11 @@ export default function InspectionView({
         }`}
       />
 
-      {/* Virtual Simulator Stream (if simulating) */}
+      {/* Virtual Simulator Stream */}
       {isSimulating && (
         <div className="absolute inset-0 w-full h-full flex items-center justify-center bg-slate-900 z-0">
           <div className="text-white text-xs font-bold bg-indigo-600/90 px-3 py-1.5 rounded-full absolute top-4 left-4 z-20 shadow">
-            ● Virtual Shop Floor Test Bench Active
+            ● Virtual PA6-GF50 Test Bench Active
           </div>
         </div>
       )}
@@ -377,104 +546,202 @@ export default function InspectionView({
         className="absolute inset-0 w-full h-full object-cover pointer-events-none z-10"
       />
 
-      {/* Scanline Effect */}
-      {isInspecting && <div className="scanline-effect z-10" />}
-
-      {/* 2. FLOATING TOP RESULT BANNER */}
-      <div className="absolute top-3 left-3 right-3 z-30 flex flex-col items-center pointer-events-none">
+      {/* 2. FLOATING TOP RESULT BANNER & STATS */}
+      <div className="absolute top-3 left-3 right-3 z-30 flex flex-col items-center pointer-events-none space-y-2">
+        {/* Main Verdict Card */}
         <div
-          className={`w-full max-w-xl py-3 px-4 rounded-2xl transition-all duration-200 shadow-2xl flex items-center justify-between pointer-events-auto backdrop-blur-md ${
-            status === 'PASS'
-              ? 'bg-emerald-600/95 text-white border-2 border-emerald-300'
-              : status === 'FAIL'
-              ? 'bg-red-600/95 text-white border-2 border-red-300 animate-pulse-fast'
-              : status === 'SEARCHING'
-              ? 'bg-amber-500/95 text-white border-2 border-amber-200'
-              : 'bg-white/95 text-slate-800 border border-slate-200 shadow-lg'
+          className={`w-full max-w-xl py-2.5 px-4 rounded-2xl transition-all duration-300 shadow-2xl flex items-center justify-between pointer-events-auto backdrop-blur-md ${
+            isLocked && status === 'PASS'
+              ? 'bg-emerald-600/95 text-white border-2 border-emerald-300 ring-4 ring-emerald-500/30'
+              : isLocked && status === 'FAIL'
+              ? 'bg-rose-600/95 text-white border-2 border-rose-300 ring-4 ring-rose-500/30'
+              : cycleState === 'STABILIZING'
+              ? 'bg-indigo-600/95 text-white border-2 border-indigo-300'
+              : 'bg-white/95 text-slate-800 border border-slate-300 shadow-lg'
           }`}
         >
           <div className="flex items-center space-x-3">
-            {status === 'PASS' && <CheckCircle className="w-8 h-8 sm:w-10 sm:h-10 text-white animate-bounce shrink-0" />}
-            {status === 'FAIL' && <AlertTriangle className="w-8 h-8 sm:w-10 sm:h-10 text-white animate-pulse shrink-0" />}
-            {status === 'SEARCHING' && <RefreshCw className="w-7 h-7 sm:w-8 sm:h-8 text-white animate-spin shrink-0" />}
-            {status === 'IDLE' && <Zap className="w-7 h-7 text-indigo-600 shrink-0" />}
+            {isLocked && status === 'PASS' && (
+              <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center">
+                <CheckCircle className="w-8 h-8 text-white shrink-0" />
+              </div>
+            )}
+            {isLocked && status === 'FAIL' && (
+              <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center">
+                <AlertTriangle className="w-8 h-8 text-white shrink-0" />
+              </div>
+            )}
+            {!isLocked && cycleState === 'STABILIZING' && (
+              <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center">
+                <Timer className="w-6 h-6 text-white animate-spin shrink-0" />
+              </div>
+            )}
+            {!isLocked && cycleState === 'POSITIONING' && (
+              <div className="w-9 h-9 rounded-xl bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-700">
+                <Scan className="w-5 h-5" />
+              </div>
+            )}
+            {!isInspecting && (
+              <div className="w-9 h-9 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-700">
+                <Zap className="w-5 h-5 text-indigo-600 shrink-0" />
+              </div>
+            )}
 
             <div>
-              <span className="text-2xl sm:text-4xl font-black tracking-wider drop-shadow-sm block leading-tight">
-                {status === 'PASS' ? 'PASS' : status === 'FAIL' ? 'FAIL' : status === 'SEARCHING' ? 'ALIGNING...' : 'READY'}
-              </span>
-              <span className="text-xs sm:text-sm font-bold opacity-95 block">
-                {status === 'PASS'
-                  ? `All ${totalTargetSleeves} Sleeves Present (${presentCount}/${totalTargetSleeves})`
-                  : status === 'FAIL'
-                  ? `Missing Sleeve Detected (${inspectionResult.missingCount} Missing)`
-                  : status === 'SEARCHING'
-                  ? 'ORB Feature Alignment • Point at Part'
-                  : 'Press "Start Inspection" for Fullscreen Camera'}
+              <div className="flex items-center space-x-2">
+                <span className="text-xl sm:text-3xl font-black tracking-wide leading-tight">
+                  {isLocked && status === 'PASS'
+                    ? 'PASS (OK PART)'
+                    : isLocked && status === 'FAIL'
+                    ? 'REJECT (DEFECT)'
+                    : cycleState === 'STABILIZING'
+                    ? 'STABILIZING...'
+                    : cycleState === 'POSITIONING'
+                    ? 'ALIGN PART'
+                    : 'READY'}
+                </span>
+                {isLocked && (
+                  <span className="px-2 py-0.5 rounded-full bg-white/25 text-white text-[10px] font-black uppercase tracking-wider flex items-center space-x-1">
+                    <Lock className="w-3 h-3" />
+                    <span>LOCKED</span>
+                  </span>
+                )}
+              </div>
+              <span className="text-xs sm:text-sm font-semibold opacity-95 block">
+                {isLocked && status === 'PASS'
+                  ? `All ${totalTargetSleeves} metal sleeves verified present and seated`
+                  : isLocked && status === 'FAIL'
+                  ? `${inspectionResult.missingCount} metal sleeve missing — remove part from line`
+                  : cycleState === 'STABILIZING'
+                  ? `Holding steady (${stabilityCounter}/${stableFramesRequired})...`
+                  : cycleState === 'POSITIONING'
+                  ? 'Center the circular motor hub in the reticle'
+                  : 'Press "Start Inspection" to begin shop-floor QC'}
               </span>
             </div>
           </div>
 
-          {/* HUD Utility Buttons */}
-          <div className="flex items-center space-x-1.5">
-            {/* Debug Mode Toggle */}
-            <button
-              onClick={() => setIsDebugMode(!isDebugMode)}
-              className={`p-2 rounded-xl border transition cursor-pointer ${
-                isDebugMode
-                  ? 'bg-indigo-600 text-white border-indigo-400 shadow-sm'
-                  : 'bg-white/80 text-slate-700 border-slate-200 hover:bg-white'
-              }`}
-              title="Toggle Debug Mode"
-            >
-              <Bug className="w-4 h-4" />
-            </button>
-            <button
-              onClick={toggleMute}
-              className={`p-2 rounded-xl border transition cursor-pointer ${
-                isMuted ? 'bg-rose-100 text-rose-700 border-rose-300' : 'bg-white/80 text-slate-700 border-slate-200'
-              }`}
-              title={isMuted ? 'Unmute Alarm' : 'Mute Alarm'}
-            >
-              {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-            </button>
-            <button
-              onClick={toggleFullscreen}
-              className="p-2 rounded-xl bg-white/80 text-slate-700 border border-slate-200 hover:bg-white transition cursor-pointer"
-              title="Toggle Fullscreen"
-            >
-              {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-            </button>
+          {/* Right Action / Countdown Button */}
+          <div className="flex items-center space-x-2">
+            {isLocked ? (
+              <button
+                onClick={unlockAndReadyNextPart}
+                className="flex items-center space-x-1.5 px-3.5 py-2 rounded-xl bg-white text-slate-900 text-xs font-black shadow-lg hover:bg-slate-100 transition active:scale-95 cursor-pointer"
+              >
+                <span>Next Part</span>
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            ) : (
+              <div className="flex items-center space-x-1">
+                <button
+                  onClick={toggleMute}
+                  className={`p-2 rounded-xl border transition cursor-pointer ${
+                    isMuted ? 'bg-rose-100 text-rose-700 border-rose-300' : 'bg-white text-slate-700 border-slate-200'
+                  }`}
+                  title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
+                >
+                  {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                </button>
+                <button
+                  onClick={toggleFullscreen}
+                  className="p-2 rounded-xl bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 transition cursor-pointer"
+                  title="Toggle Fullscreen"
+                >
+                  {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Sensitivity / Lighting Presets */}
+        {/* Hold Verdict Progress Bar (When Locked in Auto-Lock mode) */}
+        {isLocked && scanMode === 'auto_lock' && (
+          <div className="w-full max-w-xl h-2 bg-slate-800/80 rounded-full overflow-hidden border border-slate-700 pointer-events-auto shadow-md">
+            <div
+              className={`h-full transition-all duration-75 ${
+                status === 'PASS' ? 'bg-emerald-400' : 'bg-rose-400'
+              }`}
+              style={{ width: `${lockProgress}%` }}
+            />
+          </div>
+        )}
+
+        {/* QC Shift Statistics Bar */}
+        <div className="flex items-center space-x-2 bg-slate-900/85 backdrop-blur-md px-3.5 py-1 rounded-full border border-slate-700 text-white text-[11px] font-bold shadow-lg pointer-events-auto">
+          <span className="text-slate-400">Shift QC:</span>
+          <span>Total: <strong className="text-white font-mono">{qcStats.total}</strong></span>
+          <span className="text-slate-600">•</span>
+          <span className="text-emerald-400">Pass: <strong className="font-mono">{qcStats.passed}</strong></span>
+          <span className="text-slate-600">•</span>
+          <span className="text-rose-400">Fail: <strong className="font-mono">{qcStats.failed}</strong></span>
+          <span className="text-slate-600">•</span>
+          <span className="text-amber-300">
+            Yield: <strong className="font-mono">{qcStats.total > 0 ? Math.round((qcStats.passed / qcStats.total) * 100) : 100}%</strong>
+          </span>
+          {qcStats.total > 0 && (
+            <button
+              onClick={() => setQcStats({ total: 0, passed: 0, failed: 0 })}
+              className="ml-1 text-slate-400 hover:text-white transition"
+              title="Reset Shift Counter"
+            >
+              <RotateCcw className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+
+        {/* Mode Selector & Speed Switcher */}
         {isInspecting && (
-          <div className="flex items-center space-x-1.5 mt-2 bg-white/95 backdrop-blur-md px-3 py-1.5 rounded-full border border-slate-300 shadow-md pointer-events-auto text-[11px] font-bold text-slate-800">
-            <span className="text-slate-500 font-semibold">Lighting:</span>
+          <div className="flex items-center space-x-2 bg-white/95 backdrop-blur-md px-3 py-1.5 rounded-2xl border border-slate-300 shadow-md pointer-events-auto text-[11px] font-bold text-slate-800">
+            <span className="text-slate-500 font-semibold">Mode:</span>
             <button
-              onClick={() => setActiveThreshold(0.28)}
-              className={`px-2.5 py-0.5 rounded-full transition cursor-pointer ${
-                activeThreshold === 0.28 ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+              onClick={() => setScanMode('auto_lock')}
+              className={`px-2.5 py-1 rounded-xl transition cursor-pointer ${
+                scanMode === 'auto_lock'
+                  ? 'bg-indigo-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:bg-slate-100'
               }`}
             >
-              Dim (28%)
+              Auto-Lock (2.5s)
             </button>
             <button
-              onClick={() => setActiveThreshold(0.38)}
-              className={`px-2.5 py-0.5 rounded-full transition cursor-pointer ${
-                activeThreshold === 0.38 ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+              onClick={() => setScanMode('manual')}
+              className={`px-2.5 py-1 rounded-xl transition cursor-pointer ${
+                scanMode === 'manual'
+                  ? 'bg-indigo-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:bg-slate-100'
               }`}
             >
-              Normal (38%)
+              Tap to Scan
             </button>
             <button
-              onClick={() => setActiveThreshold(0.48)}
-              className={`px-2.5 py-0.5 rounded-full transition cursor-pointer ${
-                activeThreshold === 0.48 ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+              onClick={() => setScanMode('continuous')}
+              className={`px-2.5 py-1 rounded-xl transition cursor-pointer ${
+                scanMode === 'continuous'
+                  ? 'bg-indigo-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:bg-slate-100'
               }`}
             >
-              Bright (48%)
+              Continuous
+            </button>
+
+            <div className="h-4 w-px bg-slate-300 mx-1"></div>
+
+            <span className="text-slate-500 font-semibold">Speed:</span>
+            <button
+              onClick={() => setScanSpeedMs(250)}
+              className={`px-2 py-0.5 rounded-lg transition cursor-pointer ${
+                scanSpeedMs === 250 ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              Calibrated (250ms)
+            </button>
+            <button
+              onClick={() => setScanSpeedMs(150)}
+              className={`px-2 py-0.5 rounded-lg transition cursor-pointer ${
+                scanSpeedMs === 150 ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              Fast (150ms)
             </button>
           </div>
         )}
@@ -500,10 +767,10 @@ export default function InspectionView({
             </div>
             <h3 className="text-xl font-black text-slate-900 mb-1">Radiance Polymer Quality Control</h3>
             <p className="text-xs font-bold text-indigo-700 uppercase tracking-wider mb-2">
-              ORB Homography Inspection (3 Sleeves)
+              PA6-GF50 Fan Shroud (3 Metal Sleeves)
             </p>
             <p className="text-xs text-slate-500 mb-5 leading-relaxed">
-              Multi-image trained ORB feature alignment detects sleeves under any rotation (0°–360°), distance, or handheld tilt.
+              Auto-Lock mode automatically stabilizes when part is aligned, gives definitive PASS/FAIL verdict, and holds for 2.5s without flickering.
             </p>
 
             <button
@@ -557,14 +824,29 @@ export default function InspectionView({
             </button>
           )}
 
-          {/* Quick Snap Inspection */}
-          <button
-            onClick={processCurrentFrame}
-            className="p-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white transition active:scale-95 cursor-pointer"
-            title="Force Frame Inspection"
-          >
-            <Scan className="w-4 h-4" />
-          </button>
+          {/* Manual Trigger Scan Button (When in Manual or whenever user wants instant scan) */}
+          {isInspecting && (
+            <button
+              onClick={isLocked ? unlockAndReadyNextPart : handleManualTriggerScan}
+              className={`flex items-center space-x-1.5 px-4 py-3 rounded-xl font-black text-xs sm:text-sm shadow-md transition active:scale-95 cursor-pointer ${
+                isLocked
+                  ? 'bg-slate-800 hover:bg-slate-900 text-white'
+                  : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+              }`}
+            >
+              {isLocked ? (
+                <>
+                  <ArrowRight className="w-4 h-4" />
+                  <span>Next Part</span>
+                </>
+              ) : (
+                <>
+                  <Scan className="w-4 h-4" />
+                  <span>Scan Part</span>
+                </>
+              )}
+            </button>
+          )}
 
           {/* Flip Camera */}
           <button
@@ -588,13 +870,17 @@ export default function InspectionView({
             <Wrench className="w-4 h-4" />
           </button>
 
-          {/* Fullscreen Button */}
+          {/* Debug Toggle */}
           <button
-            onClick={toggleFullscreen}
-            className="p-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition active:scale-95 cursor-pointer"
-            title="Toggle Fullscreen"
+            onClick={() => setIsDebugMode(!isDebugMode)}
+            className={`p-3 rounded-xl border transition active:scale-95 cursor-pointer ${
+              isDebugMode
+                ? 'bg-indigo-600 text-white border-indigo-400'
+                : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
+            }`}
+            title="Toggle Debug Telemetry"
           >
-            {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+            <Bug className="w-4 h-4" />
           </button>
         </div>
       </div>
