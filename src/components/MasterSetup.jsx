@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { 
   Upload, Camera, Check, Plus, Trash2, ArrowLeft, 
-  Sparkles, Save, Info, Image as ImageIcon, Layers
+  Sparkles, Save, Info, Image as ImageIcon, Layers,
+  RotateCw, RotateCcw
 } from 'lucide-react';
 import { generateDefaultMasterProfile, saveMasterProfile } from '../services/masterProfile';
 
@@ -288,6 +289,67 @@ export default function MasterSetup({
     }
   };
 
+  // Rotate the active master image and synchronously adjust sleeve coordinates
+  const rotateActiveImage = (angleDeg = 90) => {
+    if (!activeImage?.dataUrl) return;
+    const img = imageRef.current;
+    if (!img.complete) return;
+
+    const canvas = document.createElement('canvas');
+    const rad = (angleDeg * Math.PI) / 180;
+    const isQuarterTurn = Math.abs(angleDeg % 180) === 90;
+
+    const newW = isQuarterTurn ? img.naturalHeight : img.naturalWidth;
+    const newH = isQuarterTurn ? img.naturalWidth : img.naturalHeight;
+
+    canvas.width = newW;
+    canvas.height = newH;
+    const ctx = canvas.getContext('2d');
+
+    ctx.translate(newW / 2, newH / 2);
+    ctx.rotate(rad);
+    ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+
+    const rotatedDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+
+    const origCx = img.naturalWidth / 2;
+    const origCy = img.naturalHeight / 2;
+    const newCx = newW / 2;
+    const newCy = newH / 2;
+
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+
+    const rotatedSleeves = sleeves.map((s) => {
+      const dx = s.x - origCx;
+      const dy = s.y - origCy;
+      const rx = dx * cos - dy * sin;
+      const ry = dx * sin + dy * cos;
+      return {
+        ...s,
+        x: Math.round(newCx + rx),
+        y: Math.round(newCy + ry),
+      };
+    });
+
+    setSleeves(rotatedSleeves);
+
+    setProfile((prev) => {
+      const updatedImages = [...prev.images];
+      updatedImages[selectedImageIndex] = {
+        ...updatedImages[selectedImageIndex],
+        dataUrl: rotatedDataUrl,
+        width: newW,
+        height: newH,
+      };
+      return {
+        ...prev,
+        images: updatedImages,
+        sleeves: rotatedSleeves,
+      };
+    });
+  };
+
   const selectedSleeve = sleeves.find((s) => s.id === selectedSleeveId);
 
   return (
@@ -429,6 +491,33 @@ export default function MasterSetup({
               >
                 <Camera className="w-3.5 h-3.5" />
                 <span>Capture Angle with Camera</span>
+              </button>
+
+              <div className="h-6 w-px bg-slate-300 mx-1 hidden sm:block"></div>
+
+              {/* Rotate Image Controls */}
+              <button
+                onClick={() => rotateActiveImage(90)}
+                className="flex items-center space-x-1 px-3 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-xs font-bold shadow-sm transition cursor-pointer"
+                title="Rotate image 90° Clockwise"
+              >
+                <RotateCw className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Rotate 90°</span>
+              </button>
+              <button
+                onClick={() => rotateActiveImage(-90)}
+                className="flex items-center space-x-1 px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-xs font-bold shadow-sm transition cursor-pointer"
+                title="Rotate image 90° Counter-Clockwise"
+              >
+                <RotateCcw className="w-3.5 h-3.5 text-indigo-600" />
+                <span>-90°</span>
+              </button>
+              <button
+                onClick={() => rotateActiveImage(180)}
+                className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-xs font-bold shadow-sm transition cursor-pointer"
+                title="Flip image 180°"
+              >
+                <span>Flip 180°</span>
               </button>
             </div>
             <div className="text-xs font-semibold text-slate-600 flex items-center space-x-1">
