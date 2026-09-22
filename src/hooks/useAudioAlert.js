@@ -4,11 +4,12 @@ import { useRef, useCallback, useState, useEffect } from 'react';
  * Web Audio API based alarm hook for instant shop-floor alerts.
  * Supports:
  * - Warning beep (1 missing): repeating beep every 1000ms
- * - Continuous warning beep (2+ missing): fast urgent pulse every 300ms
+ * - Continuous warning beep (2+ missing): fast urgent pulse every 320ms
  */
 export function useAudioAlert() {
   const [isMuted, setIsMuted] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+
   const audioCtxRef = useRef(null);
   const intervalRef = useRef(null);
   const currentSeverityRef = useRef(1);
@@ -66,13 +67,10 @@ export function useAudioAlert() {
   }, [isMuted, getAudioContext]);
 
   // Start repeating alarm
-  // missingCount = 1 -> 1 beep per second
-  // missingCount >= 2 -> continuous urgent beep every 300ms
   const startAlarm = useCallback((missingCount = 1) => {
     const isUrgent = missingCount >= 2;
     const intervalMs = isUrgent ? 320 : 1000;
 
-    // If already running with same severity, don't restart
     if (intervalRef.current && currentSeverityRef.current === missingCount) {
       return;
     }
@@ -91,7 +89,7 @@ export function useAudioAlert() {
     }, intervalMs);
   }, [triggerSingleBeep]);
 
-  // Stop alarm immediately when defect disappears or inspection stops
+  // Stop alarm immediately
   const stopAlarm = useCallback(() => {
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
