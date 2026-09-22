@@ -334,10 +334,15 @@ export default function InspectionView({
         {/* Idle / Error Placeholders */}
         {!isInspecting && !isCameraActive && !isSimulating && (
           <div className="z-10 flex flex-col items-center justify-center p-6 text-center max-w-md bg-white/95 border border-slate-300 rounded-2xl shadow-xl m-4">
-            <div className="w-16 h-16 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center mb-4 border border-indigo-100 shadow-sm">
-              <Camera className="w-8 h-8" />
+            <div className="h-16 px-4 py-2 rounded-2xl bg-white border border-slate-200 flex items-center justify-center mb-4 shadow-sm">
+              <img
+                src="/radiance-polymer-logo.png"
+                alt="Radiance Polymer Logo"
+                className="h-12 w-auto max-w-[160px] object-contain"
+              />
             </div>
-            <h3 className="text-xl font-black text-slate-900 mb-2">Camera Feed Inactive</h3>
+            <h3 className="text-xl font-black text-slate-900 mb-1">Radiance Polymer Quality Inspection</h3>
+            <p className="text-xs font-bold text-indigo-700 uppercase tracking-wider mb-2">Metal Sleeve Verification System</p>
             <p className="text-sm text-slate-600 mb-5 leading-relaxed">
               Target configuration: <strong>{totalTargetSleeves} metal sleeves</strong>. Point camera at the injection molded part and press Start Inspection.
             </p>
