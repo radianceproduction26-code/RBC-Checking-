@@ -1,19 +1,30 @@
 /**
  * Ultra-Fast Shop-Floor Metal Sleeve Inspection Engine
+ * Calibrated for Radiance Polymer PA6-GF50 3-Sleeve Fan Shroud.
  * Runs at 60 FPS directly via optimized Canvas/TypedArray processing with zero delay.
- * Works instantly without waiting for WebAssembly compilation.
+ * Includes instant 360° rotational peak detection around central hub.
  */
 
 export class FastSleeveScanner {
   constructor() {
     this.analysisCanvas = document.createElement('canvas');
     this.analysisCtx = this.analysisCanvas.getContext('2d', { willReadFrequently: true });
-    
-    // Default 3-sleeve part layout (normalized 0..1 relative to target box)
+
+    // Calibrated 3-sleeve positions for PA6-GF50 cooling fan shroud
+    // Hub Center at (0.50, 0.50)
+    this.nominalHub = { nx: 0.50, ny: 0.50 };
+    this.nominalRadius = 0.135; // distance from hub center to sleeve centers
+
+    // Sleeve nominal angular offsets from hub center:
+    // Sleeve 1: 180° (Left boss)
+    // Sleeve 2: 302.5° (Top-Right boss)
+    // Sleeve 3: 57.5° (Bottom-Right boss)
+    this.nominalAnglesDeg = [180, 302.5, 57.5];
+
     this.defaultNormalizedSleeves = [
-      { id: 1, nx: 0.30, ny: 0.36, nr: 0.09 }, // Top-Left
-      { id: 2, nx: 0.70, ny: 0.36, nr: 0.09 }, // Top-Right
-      { id: 3, nx: 0.50, ny: 0.68, nr: 0.09 }, // Bottom-Center
+      { id: 1, name: 'Sleeve 1 (Left Boss)', nx: 0.3697, ny: 0.5000, nr: 0.038, angleDeg: 180 },
+      { id: 2, name: 'Sleeve 2 (Top-Right Boss)', nx: 0.5703, ny: 0.3894, nr: 0.038, angleDeg: 302.5 },
+      { id: 3, name: 'Sleeve 3 (Bottom-Right Boss)', nx: 0.5703, ny: 0.6097, nr: 0.038, angleDeg: 57.5 },
     ];
   }
 
@@ -48,89 +59,140 @@ export class FastSleeveScanner {
     const imgData = ctx.getImageData(0, 0, sampleW, sampleH);
     const data = imgData.data;
 
-    // Center target box dimensions on the frame
-    const boxW = sampleW * 0.82;
-    const boxH = sampleH * 0.76;
+    // Center target inspection box
+    const boxW = sampleW * 0.84;
+    const boxH = sampleH * 0.80;
     const boxLeft = (sampleW - boxW) / 2;
     const boxTop = (sampleH - boxH) / 2;
+    const boxCx = boxLeft + boxW * 0.5;
+    const boxCy = boxTop + boxH * 0.5;
 
     const scaleX = videoW / sampleW;
     const scaleY = videoH / sampleH;
 
-    // Detection sensitivity threshold (0.35 - 0.40 is optimal for factory lighting)
+    // Detection threshold (0.35 - 0.40 optimal for shop-floor ambient light)
     const threshold = options.sleeveConfidenceThreshold ?? 0.38;
 
-    // Determine sleeve locations: use calibrated master sleeves if available
-    let sleevesToScan = this.defaultNormalizedSleeves;
-    if (masterPart && Array.isArray(masterPart.sleeves) && masterPart.sleeves.length === 3 && masterPart.width && masterPart.height) {
-      const mw = masterPart.width;
-      const mh = masterPart.height;
-      sleevesToScan = masterPart.sleeves.map((s, idx) => ({
-        id: s.id || idx + 1,
-        nx: s.x / mw,
-        ny: s.y / mh,
-        nr: s.radius / Math.min(mw, mh),
-      }));
-    }
-
-    // Sample background plastic brightness around center of part
+    // 1. Measure baseline PA6-GF50 black plastic brightness at central hub
     let plasticBrightnessSum = 0;
     let plasticSampleCount = 0;
-    const bgPoints = [
-      { x: Math.round(boxLeft + boxW * 0.5), y: Math.round(boxTop + boxH * 0.48) },
-      { x: Math.round(boxLeft + boxW * 0.4), y: Math.round(boxTop + boxH * 0.55) },
-      { x: Math.round(boxLeft + boxW * 0.6), y: Math.round(boxTop + boxH * 0.55) },
-    ];
-
-    for (const pt of bgPoints) {
-      if (pt.x >= 0 && pt.x < sampleW && pt.y >= 0 && pt.y < sampleH) {
-        const idx = (pt.y * sampleW + pt.x) * 4;
-        plasticBrightnessSum += (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
-        plasticSampleCount++;
+    const hubSampleRadius = boxW * 0.06;
+    for (let dy = -hubSampleRadius; dy <= hubSampleRadius; dy += 4) {
+      for (let dx = -hubSampleRadius; dx <= hubSampleRadius; dx += 4) {
+        const px = Math.round(boxCx + dx);
+        const py = Math.round(boxCy + dy);
+        if (px >= 0 && px < sampleW && py >= 0 && py < sampleH) {
+          const idx = (py * sampleW + px) * 4;
+          plasticBrightnessSum += (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+          plasticSampleCount++;
+        }
       }
     }
-    const baselinePlasticBrightness = plasticSampleCount > 0 ? plasticBrightnessSum / plasticSampleCount : 45;
+    const baselinePlastic = plasticSampleCount > 0 ? plasticBrightnessSum / plasticSampleCount : 35;
 
-    // Inspect each of the 3 target sleeve zones
+    // 2. High-speed 360° Rotational Angle Alignment
+    // Scan circular sleeve ring around hub to find part rotation orientation
+    const ringRadiusPx = this.nominalRadius * boxW;
+    let bestRotAngle = 0;
+    let maxRotScore = -1;
+
+    for (let angle = 0; angle < 360; angle += 10) {
+      let scoreSum = 0;
+      for (const na of this.nominalAnglesDeg) {
+        const totalRad = ((na + angle) % 360) * (Math.PI / 180);
+        const sx = Math.round(boxCx + Math.cos(totalRad) * ringRadiusPx);
+        const sy = Math.round(boxCy + Math.sin(totalRad) * ringRadiusPx);
+        if (sx >= 0 && sx < sampleW && sy >= 0 && sy < sampleH) {
+          const idx = (sy * sampleW + sx) * 4;
+          scoreSum += (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+        }
+      }
+      if (scoreSum > maxRotScore) {
+        maxRotScore = scoreSum;
+        bestRotAngle = angle;
+      }
+    }
+
+    // Refine rotation ±8° with 2° resolution around best coarse peak
+    let refinedAngle = bestRotAngle;
+    let refinedMaxScore = maxRotScore;
+    for (let delta = -8; delta <= 8; delta += 2) {
+      const angle = (bestRotAngle + delta + 360) % 360;
+      let scoreSum = 0;
+      for (const na of this.nominalAnglesDeg) {
+        const totalRad = ((na + angle) % 360) * (Math.PI / 180);
+        const sx = Math.round(boxCx + Math.cos(totalRad) * ringRadiusPx);
+        const sy = Math.round(boxCy + Math.sin(totalRad) * ringRadiusPx);
+        if (sx >= 0 && sx < sampleW && sy >= 0 && sy < sampleH) {
+          const idx = (sy * sampleW + sx) * 4;
+          scoreSum += (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+        }
+      }
+      if (scoreSum > refinedMaxScore) {
+        refinedMaxScore = scoreSum;
+        refinedAngle = angle;
+      }
+    }
+
+    // If part rotation peak is significantly brighter than plastic, use detected rotation
+    const rotationDetected = (refinedMaxScore / 3) > (baselinePlastic + 30);
+    const activeAngle = rotationDetected ? refinedAngle : 0;
+
+    // 3. Inspect each of the 3 Sleeves at active rotation
     const sleevesResult = [];
     let presentCount = 0;
+    const sleeveRadiusPx = Math.max(10, boxW * 0.038);
 
-    for (const ns of sleevesToScan) {
-      const cx = boxLeft + ns.nx * boxW;
-      const cy = boxTop + ns.ny * boxH;
-      const r = ns.nr * Math.min(boxW, boxH);
+    const sleeveDefs = [
+      { id: 1, name: 'Sleeve 1 (Left Boss)', nominalAngle: 180 },
+      { id: 2, name: 'Sleeve 2 (Top-Right Boss)', nominalAngle: 302.5 },
+      { id: 3, name: 'Sleeve 3 (Bottom-Right Boss)', nominalAngle: 57.5 },
+    ];
 
-      const evalResult = this.evaluateZone(data, sampleW, sampleH, cx, cy, r, baselinePlasticBrightness);
+    for (const def of sleeveDefs) {
+      const finalAngleRad = ((def.nominalAngle + activeAngle) % 360) * (Math.PI / 180);
+      const cx = boxCx + Math.cos(finalAngleRad) * ringRadiusPx;
+      const cy = boxCy + Math.sin(finalAngleRad) * ringRadiusPx;
+
+      const evalResult = this.evaluateZone(
+        data,
+        sampleW,
+        sampleH,
+        cx,
+        cy,
+        sleeveRadiusPx,
+        baselinePlastic
+      );
 
       const isPresent = evalResult.confidence >= threshold;
       if (isPresent) presentCount++;
 
       sleevesResult.push({
-        id: ns.id,
+        id: def.id,
+        name: def.name,
         x: cx * scaleX,
         y: cy * scaleY,
-        radius: Math.max(18, r * ((scaleX + scaleY) / 2)),
+        radius: Math.max(16, sleeveRadiusPx * ((scaleX + scaleY) / 2)),
         present: isPresent,
         confidence: Math.round(evalResult.confidence * 100),
+        angleDeg: Math.round(((def.nominalAngle + activeAngle) % 360)),
         details: evalResult,
       });
     }
 
     const allPresent = presentCount === 3;
     const missingCount = 3 - presentCount;
-
-    // Part detected if there are sleeves or part contrast in target zone
-    const partInView = presentCount > 0 || sleevesResult.some((s) => s.confidence > 25);
-
+    const partInView = presentCount > 0 || rotationDetected || sleevesResult.some((s) => s.confidence > 25);
     const status = allPresent ? 'PASS' : 'FAIL';
 
     return {
       status,
-      message: allPresent 
-        ? 'PASS - All 3 Sleeves Present' 
+      message: allPresent
+        ? 'PASS - All 3 Sleeves Present'
         : `FAIL - ${missingCount} Missing Sleeve${missingCount > 1 ? 's' : ''} Detected`,
       sleeves: sleevesResult,
       partDetected: partInView,
+      detectedRotationDeg: Math.round(activeAngle),
       allPresent,
       missingCount,
       presentCount,
@@ -148,8 +210,8 @@ export class FastSleeveScanner {
    */
   evaluateZone(data, width, height, cx, cy, radius, baselinePlastic) {
     const rInt = Math.max(6, Math.round(radius));
-    const minR = Math.round(rInt * 0.40);
-    const maxR = Math.round(rInt * 1.20);
+    const minR = Math.round(rInt * 0.35);
+    const maxR = Math.round(rInt * 1.25);
 
     let ringPixels = 0;
     let ringBrightnessSum = 0;
@@ -181,15 +243,14 @@ export class FastSleeveScanner {
             maxSpecular = brightness;
           }
 
-          // Brass golden hue: Red & Green prominent, Blue lower
-          const isBrass = (r > b + 12 && g > b + 6 && r > 55);
-          // Steel/metallic specular sheen:
-          const isSpecular = (brightness > 120 && Math.abs(r - g) < 40 && brightness > baselinePlastic + 15);
+          // Metallic reflection: significantly brighter than black PA6-GF50 plastic
+          const isSpecular = brightness > 110 && brightness > baselinePlastic + 25;
+          const isMetalHue = (r > 60 && g > 55) || (brightness > 130);
 
-          if (isBrass || isSpecular) {
+          if (isSpecular || isMetalHue) {
             metallicPixelCount++;
           }
-        } else if (dist < minR * 0.6) {
+        } else if (dist < minR * 0.7) {
           centerPixels++;
           centerBrightnessSum += brightness;
         }
@@ -200,24 +261,26 @@ export class FastSleeveScanner {
     const avgCenterBrightness = centerPixels > 0 ? centerBrightnessSum / centerPixels : 0;
     const metallicRatio = ringPixels > 0 ? metallicPixelCount / ringPixels : 0;
 
-    // Contrast between metallic ring and inner hole / surrounding dark plastic
-    const contrastVsPlastic = Math.max(0, avgRingBrightness - baselinePlastic) / 160;
-    const annularContrast = Math.max(0, avgRingBrightness - avgCenterBrightness) / 160;
+    // Contrast against black polymer baseline
+    const contrastVsPlastic = Math.max(0, avgRingBrightness - baselinePlastic) / 140;
+    // Contrast of outer bright rim against dark inner through-hole
+    const annularHoleContrast = Math.max(0, avgRingBrightness - avgCenterBrightness) / 120;
 
-    // Combined presence score [0..1]
+    // Combined score
     const confidence = Math.min(
       1.0,
-      (metallicRatio * 0.50) +
-      (contrastVsPlastic * 0.25) +
-      (annularContrast * 0.15) +
-      (Math.min(1.0, maxSpecular / 180) * 0.10)
+      metallicRatio * 0.45 +
+      contrastVsPlastic * 0.30 +
+      annularHoleContrast * 0.15 +
+      Math.min(1.0, maxSpecular / 180) * 0.10
     );
 
     return {
       confidence,
       metallicRatio: Math.round(metallicRatio * 100),
       avgRingBrightness: Math.round(avgRingBrightness),
-      maxSpecular,
+      maxSpecular: Math.round(maxSpecular),
+      baselinePlastic: Math.round(baselinePlastic),
     };
   }
 }

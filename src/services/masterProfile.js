@@ -1,11 +1,11 @@
-import { generatePartImage } from './demoPartGenerator';
+import { PART_INFO, PRELOADED_LAYOUTS } from '../data/defaultMasterPart';
 
-const MASTER_PROFILE_KEY = 'rbc_master_part_profile_v4';
+const MASTER_PROFILE_KEY = 'rbc_master_part_profile_v5';
 
 /**
  * Compresses an image dataUrl to JPEG to stay well within browser localStorage quota
  */
-function compressImageDataUrl(dataUrl, maxDim = 480, quality = 0.65) {
+export function compressImageDataUrl(dataUrl, maxDim = 480, quality = 0.65) {
   return new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = 'Anonymous';
@@ -27,94 +27,109 @@ function compressImageDataUrl(dataUrl, maxDim = 480, quality = 0.65) {
 }
 
 /**
- * Generates a default multi-image Master Part Profile
- * containing 6 variations: Normal, Rotated 45°, Rotated 90°, Rotated 180°, Close-up, and Workbench
+ * Returns the factory pre-trained Master Part Profile for Radiance Polymer PA6-GF50 Fan Shroud
+ * Contains all 7 multi-orientation layouts and learned physical variables.
  */
 export function generateDefaultMasterProfile() {
-  const variations = [
-    { label: 'Front Standard (0°)', rotation: 0, scale: 1.0, translateX: 0, translateY: 0 },
-    { label: 'Rotated 45°', rotation: 45, scale: 1.0, translateX: 0, translateY: 0 },
-    { label: 'Rotated 90°', rotation: 90, scale: 1.0, translateX: 0, translateY: 0 },
-    { label: 'Rotated 180°', rotation: 180, scale: 1.0, translateX: 0, translateY: 0 },
-    { label: 'Close-Up (+20% Scale)', rotation: 15, scale: 1.2, translateX: 10, translateY: -10 },
-    { label: 'Distance View (-15% Scale)', rotation: -30, scale: 0.85, translateX: -15, translateY: 15 },
-  ];
+  const images = PRELOADED_LAYOUTS.map((layout, idx) => ({
+    id: layout.id,
+    label: layout.name,
+    description: layout.description,
+    rotation: layout.rotation,
+    scale: layout.scale,
+    dataUrl: layout.imageBase64,
+    width: layout.width,
+    height: layout.height,
+    sleeves: layout.sleeves,
+    interSleeveDistances: layout.interSleeveDistances,
+  }));
 
-  const images = variations.map((v, idx) => {
-    const generated = generatePartImage({
-      width: 480,
-      height: 360,
-      rotation: v.rotation,
-      scale: v.scale,
-      translateX: v.translateX,
-      translateY: v.translateY,
-      backgroundType: idx % 2 === 0 ? 'clean' : 'shopfloor',
-      sleeves: [
-        { id: 1, x: 150, y: 135, radius: 20, present: true },
-        { id: 2, x: 330, y: 135, radius: 20, present: true },
-        { id: 3, x: 240, y: 236, radius: 20, present: true },
-      ],
-    });
-
-    // JPEG compressed dataUrl (~25KB each)
-    const compressedUrl = generated.canvas.toDataURL('image/jpeg', 0.65);
-
-    return {
-      id: `master_img_${idx + 1}`,
-      label: v.label,
-      dataUrl: compressedUrl,
-      width: 480,
-      height: 360,
-    };
-  });
+  // Default to standard 0° layout
+  const primaryLayout = PRELOADED_LAYOUTS[0];
 
   return {
-    partNumber: 'PL-BRKT-3X',
-    name: 'Injection Molded Bracket (3-Sleeve Master Profile)',
+    partNumber: 'PA6-GF50-FAN-SHROUD',
+    name: 'Radiance PA6-GF50 Fan Shroud (3 Metal Sleeves)',
+    material: PART_INFO.material,
+    totalSleeves: PART_INFO.totalSleeves,
     primaryIndex: 0,
+    activeLayoutId: primaryLayout.id,
     images,
-    sleeves: [
-      { id: 1, name: 'Position A', x: 200, y: 180, radius: 25 },
-      { id: 2, name: 'Position B', x: 440, y: 180, radius: 25 },
-      { id: 3, name: 'Position C', x: 320, y: 315, radius: 25 },
-    ],
+    // Reference 3-sleeve positions
+    sleeves: primaryLayout.sleeves.map((s) => ({
+      id: s.id,
+      name: s.name,
+      x: s.pixelX,
+      y: s.pixelY,
+      radius: s.pixelRadius,
+      normX: s.normX,
+      normY: s.normY,
+      normRadius: s.normRadius,
+      nominalAngleDeg: s.nominalAngleDeg,
+      baselineMetrics: s.baselineMetrics,
+    })),
+    hubCenter: primaryLayout.hub,
+    geometryInvariants: PART_INFO.geometryInvariants,
+    thresholds: PART_INFO.thresholds,
+    allLayouts: PRELOADED_LAYOUTS.map((l) => ({
+      id: l.id,
+      name: l.name,
+      description: l.description,
+      rotation: l.rotation,
+      scale: l.scale,
+      interSleeveDistances: l.interSleeveDistances,
+    })),
     updatedAt: new Date().toISOString(),
   };
 }
 
+/**
+ * Loads master profile from localStorage, or initializes with preloaded factory profile
+ */
 export function loadMasterProfile() {
   try {
     const raw = localStorage.getItem(MASTER_PROFILE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (parsed && Array.isArray(parsed.images) && parsed.images.length > 0 && Array.isArray(parsed.sleeves)) {
+      if (
+        parsed &&
+        parsed.partNumber === 'PA6-GF50-FAN-SHROUD' &&
+        Array.isArray(parsed.images) &&
+        parsed.images.length > 0 &&
+        Array.isArray(parsed.sleeves) &&
+        parsed.sleeves.length === 3
+      ) {
         return parsed;
       }
     }
   } catch (err) {
     console.warn('Failed to load master profile from localStorage:', err);
   }
+
   const defaultProfile = generateDefaultMasterProfile();
   saveMasterProfile(defaultProfile);
   return defaultProfile;
 }
 
+/**
+ * Saves master profile with compact payload to avoid browser quota errors
+ */
 export function saveMasterProfile(profile) {
   try {
-    // Keep only compact images
+    // Keep top 8 images with compact format
     const compactProfile = {
       ...profile,
-      images: profile.images.slice(0, 8),
+      images: (profile.images || []).slice(0, 8),
     };
     localStorage.setItem(MASTER_PROFILE_KEY, JSON.stringify(compactProfile));
     return true;
   } catch (err) {
     console.warn('LocalStorage save failed, quota exceeded:', err);
-    // Safe fallback: try pruning to top 4 images if quota exceeded
     try {
+      // Emergency reduction if storage is full
       const minimalProfile = {
         ...profile,
-        images: profile.images.slice(0, 4),
+        images: (profile.images || []).slice(0, 4),
       };
       localStorage.setItem(MASTER_PROFILE_KEY, JSON.stringify(minimalProfile));
       return true;
@@ -123,4 +138,11 @@ export function saveMasterProfile(profile) {
       return false;
     }
   }
+}
+
+/**
+ * Returns available pre-loaded factory layouts
+ */
+export function getPreloadedLayouts() {
+  return PRELOADED_LAYOUTS;
 }

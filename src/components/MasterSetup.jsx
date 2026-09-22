@@ -1,10 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { 
   Upload, Camera, Check, Plus, Trash2, ArrowLeft, 
-  Sparkles, Save, Info, Image as ImageIcon, Layers,
-  RotateCw, RotateCcw
+  Sparkles, Save, Info, Layers,
+  RotateCw, RotateCcw, Cpu, Compass, CheckCircle2, Sliders, ShieldCheck
 } from 'lucide-react';
 import { generateDefaultMasterProfile, saveMasterProfile } from '../services/masterProfile';
+import { PRELOADED_LAYOUTS, PART_INFO } from '../data/defaultMasterPart';
 
 export default function MasterSetup({
   currentProfile,
@@ -15,14 +16,24 @@ export default function MasterSetup({
 }) {
   const [profile, setProfile] = useState(currentProfile);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
-  const [sleeves, setSleeves] = useState(currentProfile?.sleeves || [
-    { id: 1, name: 'Position A', x: 200, y: 180, radius: 25 },
-    { id: 2, name: 'Position B', x: 440, y: 180, radius: 25 },
-    { id: 3, name: 'Position C', x: 320, y: 315, radius: 25 },
-  ]);
+  const [sleeves, setSleeves] = useState(
+    currentProfile?.sleeves || PRELOADED_LAYOUTS[0]?.sleeves.map((s) => ({
+      id: s.id,
+      name: s.name,
+      x: s.pixelX,
+      y: s.pixelY,
+      radius: s.pixelRadius,
+      normX: s.normX,
+      normY: s.normY,
+      normRadius: s.normRadius,
+      nominalAngleDeg: s.nominalAngleDeg,
+      baselineMetrics: s.baselineMetrics,
+    }))
+  );
   const [selectedSleeveId, setSelectedSleeveId] = useState(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
+  const [showVariablesPanel, setShowVariablesPanel] = useState(true);
 
   const canvasRef = useRef(null);
   const imageRef = useRef(new Image());
@@ -53,20 +64,53 @@ export default function MasterSetup({
     if (!img.complete || img.naturalWidth === 0) return;
 
     canvas.width = img.naturalWidth || 640;
-    canvas.height = img.naturalHeight || 480;
+    canvas.height = img.naturalHeight || 640;
 
     // Draw reference image
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    // Draw central hub reticle
+    const hubCx = canvas.width / 2;
+    const hubCy = canvas.height / 2;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(hubCx, hubCy, 6, 0, Math.PI * 2);
+    ctx.fillStyle = '#0284c7';
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Central hub reference circle connecting the 3 sleeves
+    const avgDist = sleeves.reduce((sum, s) => sum + Math.hypot(s.x - hubCx, s.y - hubCy), 0) / (sleeves.length || 1);
+    ctx.beginPath();
+    ctx.arc(hubCx, hubCy, avgDist, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(2, 132, 199, 0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
 
     // Draw each annotated sleeve
     sleeves.forEach((sleeve, idx) => {
       const isSelected = sleeve.id === selectedSleeveId;
       const { x, y, radius } = sleeve;
 
+      // Radial strut connector line from hub to sleeve boss
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(hubCx, hubCy);
+      ctx.lineTo(x, y);
+      ctx.strokeStyle = isSelected ? 'rgba(2, 132, 199, 0.8)' : 'rgba(5, 150, 105, 0.4)';
+      ctx.lineWidth = isSelected ? 2 : 1.5;
+      ctx.stroke();
+      ctx.restore();
+
       // Outer halo
       ctx.beginPath();
-      ctx.arc(x, y, radius + 5, 0, Math.PI * 2);
-      ctx.strokeStyle = isSelected ? 'rgba(2, 132, 199, 0.9)' : 'rgba(5, 150, 105, 0.5)';
+      ctx.arc(x, y, radius + 6, 0, Math.PI * 2);
+      ctx.strokeStyle = isSelected ? 'rgba(2, 132, 199, 0.95)' : 'rgba(5, 150, 105, 0.6)';
       ctx.lineWidth = isSelected ? 3.5 : 2;
       ctx.stroke();
 
@@ -75,7 +119,7 @@ export default function MasterSetup({
       ctx.arc(x, y, radius, 0, Math.PI * 2);
       ctx.strokeStyle = isSelected ? '#0284c7' : '#059669';
       ctx.lineWidth = isSelected ? 4 : 3;
-      ctx.fillStyle = isSelected ? 'rgba(2, 132, 199, 0.25)' : 'rgba(5, 150, 105, 0.2)';
+      ctx.fillStyle = isSelected ? 'rgba(2, 132, 199, 0.3)' : 'rgba(5, 150, 105, 0.2)';
       ctx.fill();
       ctx.stroke();
 
@@ -90,11 +134,11 @@ export default function MasterSetup({
       ctx.stroke();
 
       // Badge Label
-      ctx.font = 'bold 12px sans-serif';
-      const label = sleeve.name || `Position ${String.fromCharCode(65 + idx)}`;
+      ctx.font = 'bold 11px sans-serif';
+      const label = sleeve.name || `Sleeve ${idx + 1}`;
       const textWidth = ctx.measureText(label).width;
       ctx.fillStyle = isSelected ? '#0284c7' : '#059669';
-      ctx.fillRect(x - textWidth / 2 - 4, y - radius - 20, textWidth + 8, 18);
+      ctx.fillRect(x - textWidth / 2 - 5, y - radius - 20, textWidth + 10, 18);
       ctx.fillStyle = '#ffffff';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -130,16 +174,6 @@ export default function MasterSetup({
         offsetX: hitSleeve.x - x,
         offsetY: hitSleeve.y - y,
       };
-    } else if (sleeves.length < 3) {
-      const newSleeve = {
-        id: Date.now(),
-        name: `Position ${String.fromCharCode(65 + sleeves.length)}`,
-        x: Math.round(x),
-        y: Math.round(y),
-        radius: 25,
-      };
-      setSleeves((prev) => [...prev, newSleeve]);
-      setSelectedSleeveId(newSleeve.id);
     }
   };
 
@@ -159,6 +193,37 @@ export default function MasterSetup({
     draggingRef.current = null;
   };
 
+  // Switch to a preloaded layout
+  const handleSelectPreloadedLayout = (layout) => {
+    // Find index in profile images
+    let targetIndex = profile?.images?.findIndex((img) => img.id === layout.id);
+    if (targetIndex === -1) {
+      targetIndex = 0;
+    }
+    setSelectedImageIndex(targetIndex);
+
+    // Apply layout sleeves
+    const newSleeves = layout.sleeves.map((s) => ({
+      id: s.id,
+      name: s.name,
+      x: s.pixelX,
+      y: s.pixelY,
+      radius: s.pixelRadius,
+      normX: s.normX,
+      normY: s.normY,
+      normRadius: s.normRadius,
+      nominalAngleDeg: s.nominalAngleDeg,
+      baselineMetrics: s.baselineMetrics,
+    }));
+
+    setSleeves(newSleeves);
+    setProfile((prev) => ({
+      ...prev,
+      activeLayoutId: layout.id,
+      sleeves: newSleeves,
+    }));
+  };
+
   // Multi-Image Upload
   const handleMultipleFilesUpload = (e) => {
     const files = Array.from(e.target.files || []);
@@ -173,7 +238,7 @@ export default function MasterSetup({
             label: `Upload ${profile.images.length + idx + 1} (${file.name})`,
             dataUrl: ev.target.result,
             width: 640,
-            height: 480,
+            height: 640,
           });
         };
         reader.readAsDataURL(file);
@@ -183,7 +248,7 @@ export default function MasterSetup({
     Promise.all(readers).then((newImages) => {
       setProfile((prev) => ({
         ...prev,
-        images: [...prev.images, ...newImages].slice(0, 10), // cap at 10 images
+        images: [...prev.images, ...newImages].slice(0, 12),
       }));
     });
   };
@@ -212,11 +277,11 @@ export default function MasterSetup({
 
     const canvas = document.createElement('canvas');
     canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
+    canvas.height = video.videoHeight || 640;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    const dataUrl = canvas.toDataURL('image/png');
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
     const newImage = {
       id: `photo_${Date.now()}`,
       label: `Snapshot ${profile.images.length + 1}`,
@@ -227,7 +292,7 @@ export default function MasterSetup({
 
     setProfile((prev) => ({
       ...prev,
-      images: [...prev.images, newImage].slice(0, 10),
+      images: [...prev.images, newImage].slice(0, 12),
     }));
 
     if (cameraStreamRef.current) {
@@ -251,19 +316,27 @@ export default function MasterSetup({
     }
   };
 
-  // Reset to Default Multi-Angle Profile
-  const handleResetToDefaultProfile = () => {
+  // Reset to Default Multi-Layout Factory Profile
+  const handleResetToDefaultProfile = async () => {
     const defaultProfile = generateDefaultMasterProfile();
     setProfile(defaultProfile);
     setSleeves(defaultProfile.sleeves);
     setSelectedImageIndex(0);
     setSelectedSleeveId(null);
+    saveMasterProfile(defaultProfile);
+
+    if (cvEngine) {
+      await cvEngine.loadMasterProfile(defaultProfile);
+    }
+
+    setSaveSuccess(true);
+    setTimeout(() => setSaveSuccess(false), 2500);
   };
 
   // Save Master Part Profile
   const handleSaveProfile = async () => {
     if (sleeves.length !== 3) {
-      alert('Please configure all 3 sleeve positions (A, B, C) before saving.');
+      alert('Please configure all 3 sleeve positions before saving.');
       return;
     }
 
@@ -289,7 +362,7 @@ export default function MasterSetup({
     }
   };
 
-  // Rotate the active master image and synchronously adjust sleeve coordinates
+  // Rotate active master image and synchronously adjust sleeve coordinates
   const rotateActiveImage = (angleDeg = 90) => {
     if (!activeImage?.dataUrl) return;
     const img = imageRef.current;
@@ -310,7 +383,7 @@ export default function MasterSetup({
     ctx.rotate(rad);
     ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
 
-    const rotatedDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    const rotatedDataUrl = canvas.toDataURL('image/jpeg', 0.82);
 
     const origCx = img.naturalWidth / 2;
     const origCy = img.naturalHeight / 2;
@@ -365,11 +438,16 @@ export default function MasterSetup({
             <span>Back to Live Inspection</span>
           </button>
           <div>
-            <h2 className="text-lg font-black text-slate-900 leading-tight">
-              Master Learning – Multi-Image Profile
-            </h2>
+            <div className="flex items-center space-x-2">
+              <h2 className="text-lg font-black text-slate-900 leading-tight">
+                Master Part Learning – Radiance PA6-GF50 Fan Shroud
+              </h2>
+              <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-black border border-emerald-300 uppercase tracking-wide">
+                7 Pre-Trained Layouts
+              </span>
+            </div>
             <p className="text-xs text-slate-500 font-medium">
-              Upload 5–10 images of a GOOD part at different angles & rotations to train ORB feature matching.
+              Multi-layout learning variables generated from the OK part image (Rotations 0°–360°, Tilt & Scale).
             </p>
           </div>
         </div>
@@ -378,9 +456,11 @@ export default function MasterSetup({
         <div className="flex items-center space-x-2">
           <button
             onClick={handleResetToDefaultProfile}
-            className="px-3 py-2 rounded-xl bg-white hover:bg-slate-50 text-indigo-700 border border-slate-300 text-xs font-bold shadow-sm transition cursor-pointer"
+            className="flex items-center space-x-1.5 px-3 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-bold shadow-sm transition cursor-pointer"
+            title="Reload all 7 pre-learned OK part layouts"
           >
-            Load 6-Angle Standard Profile
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>Reload Default OK Part Layouts</span>
           </button>
           <button
             onClick={handleSaveProfile}
@@ -394,81 +474,59 @@ export default function MasterSetup({
 
       {saveSuccess && (
         <div className="mt-3 p-3 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-800 text-sm font-bold flex items-center space-x-2 shadow-sm">
-          <Check className="w-5 h-5 text-emerald-600" />
+          <Check className="w-5 h-5 text-emerald-600 flex-shrink-0" />
           <span>
-            Master Profile trained successfully with {profile?.images?.length || 0} reference images and 3 sleeve regions!
+            Master Part Profile and all 7 layout learning variables successfully trained into inspection engine!
           </span>
         </div>
       )}
 
-      {/* Multi-Image Thumbnail Ribbon */}
+      {/* Preloaded Layouts Ribbon */}
       <div className="mt-4 p-3 bg-white border border-slate-300 rounded-2xl shadow-sm">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center space-x-2">
-            <Layers className="w-4 h-4 text-indigo-600" />
-            <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-              Master Learning Images ({profile?.images?.length || 0} / 10 Images)
+            <Compass className="w-4 h-4 text-indigo-600" />
+            <span className="text-xs font-black text-slate-800 uppercase tracking-wider">
+              Pre-Learned OK Part Layouts ({PRELOADED_LAYOUTS.length} Layouts Available)
             </span>
           </div>
           <span className="text-[11px] text-slate-500">
-            Click thumbnail to view/annotate • Recommended: 5–10 images
+            Click any layout to inspect transformed sleeve coordinates & orientation
           </span>
         </div>
 
-        <div className="flex items-center space-x-2 overflow-x-auto pb-1">
-          {profile?.images?.map((imgItem, idx) => (
-            <div
-              key={imgItem.id}
-              onClick={() => setSelectedImageIndex(idx)}
-              className={`relative flex-shrink-0 w-24 h-20 rounded-xl overflow-hidden border-2 cursor-pointer transition ${
-                idx === selectedImageIndex
-                  ? 'border-indigo-600 ring-2 ring-indigo-300 shadow-md'
-                  : 'border-slate-300 hover:border-slate-400'
-              }`}
-            >
-              <img
-                src={imgItem.dataUrl}
-                alt={imgItem.label}
-                className="w-full h-full object-cover"
-              />
-              <span className="absolute bottom-0 inset-x-0 bg-black/70 text-white text-[9px] font-bold text-center py-0.5 truncate px-1">
-                {imgItem.label || `#${idx + 1}`}
-              </span>
-              {profile.images.length > 1 && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    removeImage(idx);
-                  }}
-                  className="absolute top-1 right-1 p-0.5 rounded bg-rose-600 text-white hover:bg-rose-700"
-                  title="Remove Image"
-                >
-                  <Trash2 className="w-3 h-3" />
-                </button>
-              )}
-            </div>
-          ))}
-
-          {/* Add Image Button */}
-          {profile?.images?.length < 10 && (
-            <div className="flex-shrink-0 flex items-center space-x-1.5 pl-2">
-              <input
-                type="file"
-                ref={fileInputRef}
-                onChange={handleMultipleFilesUpload}
-                accept="image/*"
-                multiple
-                className="hidden"
-              />
+        <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2">
+          {PRELOADED_LAYOUTS.map((layout) => {
+            const isActive = profile?.images?.[selectedImageIndex]?.id === layout.id;
+            return (
               <button
-                onClick={() => fileInputRef.current?.click()}
-                className="flex flex-col items-center justify-center w-24 h-20 rounded-xl border-2 border-dashed border-slate-300 hover:border-indigo-500 hover:bg-indigo-50/50 text-slate-500 hover:text-indigo-600 transition cursor-pointer"
+                key={layout.id}
+                onClick={() => handleSelectPreloadedLayout(layout)}
+                className={`flex flex-col items-center p-2 rounded-xl border text-left transition cursor-pointer ${
+                  isActive
+                    ? 'border-indigo-600 bg-indigo-50/80 ring-2 ring-indigo-300 shadow-sm'
+                    : 'border-slate-200 bg-slate-50/60 hover:bg-slate-100 hover:border-slate-300'
+                }`}
               >
-                <Plus className="w-5 h-5 mb-1" />
-                <span className="text-[10px] font-bold">Add Images</span>
+                <div className="relative w-full aspect-square rounded-lg overflow-hidden border border-slate-200 bg-slate-900 mb-1.5">
+                  <img
+                    src={layout.imageBase64}
+                    alt={layout.name}
+                    className="w-full h-full object-cover"
+                  />
+                  <span className="absolute top-1 right-1 bg-black/75 text-white text-[9px] font-mono px-1 rounded">
+                    {layout.rotation}°
+                  </span>
+                </div>
+                <span className="text-[11px] font-bold text-slate-900 truncate w-full text-center">
+                  {layout.name.replace('Layout ', 'L')}
+                </span>
+                <span className="text-[9px] text-slate-500 truncate w-full text-center">
+                  scale: {Math.round(layout.scale * 100)}%
+                </span>
               </button>
-            </div>
-          )}
+            );
+          })}
         </div>
       </div>
 
@@ -483,14 +541,14 @@ export default function MasterSetup({
                 className="flex items-center space-x-1 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm cursor-pointer"
               >
                 <Upload className="w-3.5 h-3.5" />
-                <span>Upload Photos</span>
+                <span>Upload Part Image</span>
               </button>
               <button
                 onClick={startCameraCapture}
                 className="flex items-center space-x-1 px-3 py-1.5 rounded-xl bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 text-xs font-bold shadow-sm cursor-pointer"
               >
                 <Camera className="w-3.5 h-3.5" />
-                <span>Capture Angle with Camera</span>
+                <span>Camera Snap</span>
               </button>
 
               <div className="h-6 w-px bg-slate-300 mx-1 hidden sm:block"></div>
@@ -498,7 +556,7 @@ export default function MasterSetup({
               {/* Rotate Image Controls */}
               <button
                 onClick={() => rotateActiveImage(90)}
-                className="flex items-center space-x-1 px-3 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-xs font-bold shadow-sm transition cursor-pointer"
+                className="flex items-center space-x-1 px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-xs font-bold shadow-sm transition cursor-pointer"
                 title="Rotate image 90° Clockwise"
               >
                 <RotateCw className="w-3.5 h-3.5 text-indigo-600" />
@@ -506,7 +564,7 @@ export default function MasterSetup({
               </button>
               <button
                 onClick={() => rotateActiveImage(-90)}
-                className="flex items-center space-x-1 px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-xs font-bold shadow-sm transition cursor-pointer"
+                className="flex items-center space-x-1 px-2 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-xs font-bold shadow-sm transition cursor-pointer"
                 title="Rotate image 90° Counter-Clockwise"
               >
                 <RotateCcw className="w-3.5 h-3.5 text-indigo-600" />
@@ -519,10 +577,25 @@ export default function MasterSetup({
               >
                 <span>Flip 180°</span>
               </button>
+
+              <div className="h-6 w-px bg-slate-300 mx-1 hidden sm:block"></div>
+
+              <button
+                onClick={() => setShowVariablesPanel(!showVariablesPanel)}
+                className={`flex items-center space-x-1 px-2.5 py-1.5 rounded-xl border text-xs font-bold shadow-sm transition cursor-pointer ${
+                  showVariablesPanel
+                    ? 'bg-indigo-600 text-white border-indigo-600'
+                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                }`}
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>Learning Variables</span>
+              </button>
             </div>
+
             <div className="text-xs font-semibold text-slate-600 flex items-center space-x-1">
               <Info className="w-4 h-4 text-slate-400" />
-              <span>Viewing: {activeImage?.label || `Image #${selectedImageIndex + 1}`} • Drag circles to position sleeves</span>
+              <span>Viewing: {activeImage?.label || `Image #${selectedImageIndex + 1}`} • Drag sleeves to fine-tune</span>
             </div>
           </div>
 
@@ -560,7 +633,7 @@ export default function MasterSetup({
           )}
 
           {/* Canvas Area */}
-          <div className="relative flex-1 bg-slate-200 flex items-center justify-center p-3 overflow-hidden min-h-[360px]">
+          <div className="relative flex-1 bg-slate-200 flex items-center justify-center p-3 overflow-hidden min-h-[400px]">
             <canvas
               ref={canvasRef}
               onMouseDown={handleCanvasMouseDown}
@@ -569,12 +642,90 @@ export default function MasterSetup({
               onTouchStart={handleCanvasMouseDown}
               onTouchMove={handleCanvasMouseMove}
               onTouchEnd={handleCanvasMouseUp}
-              className="max-w-full max-h-[60vh] object-contain border border-slate-300 rounded-xl shadow-md cursor-crosshair bg-white"
+              className="max-w-full max-h-[62vh] object-contain border border-slate-300 rounded-xl shadow-md cursor-crosshair bg-white"
             />
           </div>
+
+          {/* Learning Variables & Invariants Drawer */}
+          {showVariablesPanel && (
+            <div className="p-3.5 bg-slate-50 border-t border-slate-200">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center space-x-2">
+                  <Cpu className="w-4 h-4 text-indigo-600" />
+                  <span className="text-xs font-black text-slate-800 uppercase tracking-wide">
+                    Calibrated Learning Variables & Invariants (PA6-GF50 Fan Shroud)
+                  </span>
+                </div>
+                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-md border border-emerald-200">
+                  Rigid Body Invariants: Calibrated
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-xs">
+                  <span className="block text-[10px] font-bold text-slate-400 uppercase">Part Material</span>
+                  <span className="font-bold text-slate-900">PA6-GF50 Polyamide</span>
+                  <span className="block text-[10px] text-slate-500">50% Glass Filled</span>
+                </div>
+
+                <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-xs">
+                  <span className="block text-[10px] font-bold text-slate-400 uppercase">Required Sleeves</span>
+                  <span className="font-bold text-emerald-700">Exactly 3 Metal Bushings</span>
+                  <span className="block text-[10px] text-slate-500">Around Motor Hub</span>
+                </div>
+
+                <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-xs">
+                  <span className="block text-[10px] font-bold text-slate-400 uppercase">Hub Center (Norm)</span>
+                  <span className="font-mono font-bold text-indigo-900">X: 0.500, Y: 0.500</span>
+                  <span className="block text-[10px] text-slate-500">Radius: 0.135 frame</span>
+                </div>
+
+                <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-xs">
+                  <span className="block text-[10px] font-bold text-slate-400 uppercase">Metal Sheen Metric</span>
+                  <span className="font-mono font-bold text-amber-600">202 / 255 luminance</span>
+                  <span className="block text-[10px] text-slate-500">Min Threshold: 115</span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-2 text-xs">
+                <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-xs">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="font-bold text-slate-900">Sleeve 1 (Left Boss)</span>
+                    <span className="font-mono text-[11px] font-bold text-emerald-700">180°</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 space-y-0.5 font-mono">
+                    <div>Norm: (0.370, 0.500)</div>
+                    <div>Distance: 0.130 • Circularity: 0.91</div>
+                  </div>
+                </div>
+
+                <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-xs">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="font-bold text-slate-900">Sleeve 2 (Top-Right)</span>
+                    <span className="font-mono text-[11px] font-bold text-emerald-700">302.5°</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 space-y-0.5 font-mono">
+                    <div>Norm: (0.570, 0.389)</div>
+                    <div>Distance: 0.131 • Circularity: 0.91</div>
+                  </div>
+                </div>
+
+                <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-xs">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="font-bold text-slate-900">Sleeve 3 (Bottom-Right)</span>
+                    <span className="font-mono text-[11px] font-bold text-emerald-700">57.5°</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 space-y-0.5 font-mono">
+                    <div>Norm: (0.570, 0.610)</div>
+                    <div>Distance: 0.130 • Circularity: 0.91</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* Right Sidebar: Predefined Sleeve Regions (A, B, C) */}
+        {/* Right Sidebar: Predefined Sleeve Regions (1, 2, 3) */}
         <div className="lg:col-span-1 bg-white border border-slate-300 rounded-2xl p-4 flex flex-col shadow-sm space-y-4">
           <div className="flex items-center justify-between pb-2 border-b border-slate-200">
             <h3 className="font-black text-slate-900 text-sm">Sleeve Regions (3 Positions)</h3>
@@ -600,8 +751,8 @@ export default function MasterSetup({
                 </div>
                 <input
                   type="range"
-                  min="14"
-                  max="55"
+                  min="12"
+                  max="45"
                   value={selectedSleeve.radius}
                   onChange={(e) => {
                     const r = parseInt(e.target.value, 10);
@@ -640,7 +791,7 @@ export default function MasterSetup({
               >
                 <div className="flex items-center space-x-2">
                   <span className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-800 font-black flex items-center justify-center text-xs border border-emerald-300">
-                    {String.fromCharCode(65 + idx)}
+                    {idx + 1}
                   </span>
                   <div>
                     <span className="font-bold block">{sleeve.name}</span>
@@ -649,16 +800,17 @@ export default function MasterSetup({
                     </span>
                   </div>
                 </div>
+                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
               </div>
             ))}
           </div>
 
-          {/* Master Learning Instructions */}
+          {/* Master Learning Guidelines */}
           <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-[11px] text-slate-600 space-y-1.5">
-            <span className="font-bold text-slate-800 block">Master Learning Guidelines:</span>
-            <p>• Upload 5–10 good parts at different rotations (0°, 45°, 90°, 180°).</p>
-            <p>• Include slightly tilted and zoomed-in photos.</p>
-            <p>• Click "Save & Train Profile" to generate multi-image ORB descriptors.</p>
+            <span className="font-bold text-slate-800 block">Pre-Fed OK Part Status:</span>
+            <p className="text-emerald-700 font-semibold">✓ 7 layout variations pre-calculated from your OK part image.</p>
+            <p>• Fast 60 FPS scanner automatically resolves part rotation 0°–360°.</p>
+            <p>• OpenCV ORB extracts keypoint descriptors across all 7 layouts.</p>
           </div>
         </div>
       </div>

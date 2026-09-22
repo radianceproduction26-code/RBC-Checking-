@@ -12,11 +12,11 @@ export default function SimulatorModal({
   const [rotation, setRotation] = useState(25); // initial test rotation (25 degrees)
   const [translateX, setTranslateX] = useState(10);
   const [translateY, setTranslateY] = useState(-8);
-  // Exactly 3 metal sleeves configuration
+  // Exactly 3 metal sleeves configuration for Radiance PA6-GF50 fan shroud
   const [sleevesState, setSleevesState] = useState([
-    { id: 1, present: true, label: 'Sleeve 1 (Top-Left)' },
-    { id: 2, present: true, label: 'Sleeve 2 (Top-Right)' },
-    { id: 3, present: true, label: 'Sleeve 3 (Bottom-Center)' },
+    { id: 1, present: true, label: 'Sleeve 1 (Left Boss - 180°)' },
+    { id: 2, present: true, label: 'Sleeve 2 (Top-Right Boss - 302°)' },
+    { id: 3, present: true, label: 'Sleeve 3 (Bottom-Right Boss - 57°)' },
   ]);
   const [handheldJitter, setHandheldJitter] = useState(false);
 
@@ -40,15 +40,15 @@ export default function SimulatorModal({
 
       const generated = generatePartImage({
         width: 640,
-        height: 480,
+        height: 640,
         rotation: curRot,
         translateX: curX,
         translateY: curY,
         backgroundType: 'shopfloor',
         sleeves: [
-          { id: 1, x: 200, y: 180, radius: 25, present: sleevesState[0]?.present ?? true },
-          { id: 2, x: 440, y: 180, radius: 25, present: sleevesState[1]?.present ?? true },
-          { id: 3, x: 320, y: 315, radius: 25, present: sleevesState[2]?.present ?? true },
+          { id: 1, name: 'Sleeve 1 (Left Boss)', x: 237, y: 320, radius: 18, present: sleevesState[0]?.present ?? true },
+          { id: 2, name: 'Sleeve 2 (Top-Right Boss)', x: 365, y: 249, radius: 18, present: sleevesState[1]?.present ?? true },
+          { id: 3, name: 'Sleeve 3 (Bottom-Right Boss)', x: 365, y: 390, radius: 18, present: sleevesState[2]?.present ?? true },
         ],
       });
 

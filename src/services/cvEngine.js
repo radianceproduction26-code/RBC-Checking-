@@ -306,11 +306,11 @@ export class CVInspectionEngine {
         return { x: pt.x * scaleX, y: pt.y * scaleY };
       });
 
-      // Reference sleeve definitions (A, B, C)
+      // Reference sleeve definitions calibrated for PA6-GF50 Fan Shroud
       const refSleeves = this.masterProfile?.sleeves || [
-        { id: 1, name: 'Sleeve Position A', x: 200, y: 180, radius: 25 },
-        { id: 2, name: 'Sleeve Position B', x: 440, y: 180, radius: 25 },
-        { id: 3, name: 'Sleeve Position C', x: 320, y: 315, radius: 25 },
+        { id: 1, name: 'Sleeve 1 (Left Boss)', x: 237, y: 320, radius: 18 },
+        { id: 2, name: 'Sleeve 2 (Top-Right Boss)', x: 365, y: 249, radius: 18 },
+        { id: 3, name: 'Sleeve 3 (Bottom-Right Boss)', x: 365, y: 390, radius: 18 },
       ];
 
       const threshold = settings.sleeveConfidenceThreshold ?? 0.38;
@@ -409,15 +409,48 @@ export class CVInspectionEngine {
   runGeometricReticleInspection(frameImgData, cvW, cvH, scaleX, scaleY, settings) {
     const cx = cvW / 2;
     const cy = cvH / 2;
-    const spreadX = cvW * 0.20;
-    const spreadY = cvH * 0.16;
-    const baseRadius = 24;
+    const ringR = cvW * 0.135;
+    const baseRadius = 20;
+
+    // Fast 360° rotational sweep around central hub
+    const nominalAngles = [180, 302.5, 57.5];
+    const data = frameImgData.data;
+
+    let bestAngle = 0;
+    let maxScore = -1;
+
+    for (let a = 0; a < 360; a += 10) {
+      let scoreSum = 0;
+      for (const na of nominalAngles) {
+        const rad = ((na + a) % 360) * Math.PI / 180;
+        const px = Math.round(cx + Math.cos(rad) * ringR);
+        const py = Math.round(cy + Math.sin(rad) * ringR);
+        if (px >= 0 && px < cvW && py >= 0 && py < cvH) {
+          const idx = (py * cvW + px) * 4;
+          scoreSum += (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+        }
+      }
+      if (scoreSum > maxScore) {
+        maxScore = scoreSum;
+        bestAngle = a;
+      }
+    }
 
     const zones = [
-      { id: 1, name: 'Sleeve Position A', x: cx - spreadX, y: cy - spreadY, radius: baseRadius },
-      { id: 2, name: 'Sleeve Position B', x: cx + spreadX, y: cy - spreadY, radius: baseRadius },
-      { id: 3, name: 'Sleeve Position C', x: cx, y: cy + spreadY, radius: baseRadius },
-    ];
+      { id: 1, name: 'Sleeve 1 (Left Boss)', angle: 180 },
+      { id: 2, name: 'Sleeve 2 (Top-Right Boss)', angle: 302.5 },
+      { id: 3, name: 'Sleeve 3 (Bottom-Right Boss)', angle: 57.5 },
+    ].map((s) => {
+      const rad = ((s.angle + bestAngle) % 360) * (Math.PI / 180);
+      return {
+        id: s.id,
+        name: s.name,
+        x: cx + Math.cos(rad) * ringR,
+        y: cy + Math.sin(rad) * ringR,
+        radius: baseRadius,
+        angleDeg: Math.round((s.angle + bestAngle) % 360),
+      };
+    });
 
     const threshold = settings.sleeveConfidenceThreshold ?? 0.38;
 
@@ -446,6 +479,7 @@ export class CVInspectionEngine {
         radius: Math.max(18, zone.radius * scaleX),
         rawPresent: isPresent,
         confidence: Math.round(compositeConfidence * 100),
+        angleDeg: zone.angleDeg,
         metrics,
       };
     });
@@ -467,6 +501,7 @@ export class CVInspectionEngine {
     return {
       partDetected: true,
       matchedFeatures: 45,
+      detectedRotationDeg: Math.round(bestAngle),
       sleeve1: finalSleeves[0]?.present ? 'present' : 'missing',
       sleeve2: finalSleeves[1]?.present ? 'present' : 'missing',
       sleeve3: finalSleeves[2]?.present ? 'present' : 'missing',
@@ -483,10 +518,10 @@ export class CVInspectionEngine {
         inliers: 18,
         matchedFeatures: 45,
         corners: [
-          { x: (cx - spreadX * 1.5) * scaleX, y: (cy - spreadY * 1.6) * scaleY },
-          { x: (cx + spreadX * 1.5) * scaleX, y: (cy - spreadY * 1.6) * scaleY },
-          { x: (cx + spreadX * 1.5) * scaleX, y: (cy + spreadY * 1.6) * scaleY },
-          { x: (cx - spreadX * 1.5) * scaleX, y: (cy + spreadY * 1.6) * scaleY },
+          { x: (cx - ringR * 1.8) * scaleX, y: (cy - ringR * 1.8) * scaleY },
+          { x: (cx + ringR * 1.8) * scaleX, y: (cy - ringR * 1.8) * scaleY },
+          { x: (cx + ringR * 1.8) * scaleX, y: (cy + ringR * 1.8) * scaleY },
+          { x: (cx - ringR * 1.8) * scaleX, y: (cy + ringR * 1.8) * scaleY },
         ],
       },
     };
