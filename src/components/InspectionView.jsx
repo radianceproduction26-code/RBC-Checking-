@@ -30,6 +30,7 @@ export default function InspectionView({
 
   const [isInspecting, setIsInspecting] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [activeThreshold, setActiveThreshold] = useState(settings?.sleeveConfidenceThreshold ?? 0.38);
   const [inspectionResult, setInspectionResult] = useState({
     status: 'IDLE',
     message: 'Press "Start Inspection" to begin',
@@ -129,7 +130,8 @@ export default function InspectionView({
     if (!w || !h || w <= 0 || h <= 0) return;
 
     try {
-      const result = cvEngine.processFrame(sourceElement, settings);
+      const activeSettings = { ...settings, sleeveConfidenceThreshold: activeThreshold };
+      const result = cvEngine.processFrame(sourceElement, activeSettings);
       if (result) {
         setInspectionResult(result);
         drawOverlay(result, sourceElement);
@@ -137,7 +139,7 @@ export default function InspectionView({
     } catch (err) {
       console.warn('Scan frame error:', err);
     }
-  }, [cvEngine, isSimulating, simulatedCanvas, videoRef, settings]);
+  }, [cvEngine, isSimulating, simulatedCanvas, videoRef, settings, activeThreshold]);
 
   // Continuous Inspection Loop
   const runInspectionLoop = useCallback(() => {
@@ -278,9 +280,10 @@ export default function InspectionView({
       ctx.fillStyle = '#ffffff';
       ctx.fillText(isOk ? '✓' : '✕', x, y);
 
-      // Status Tag
-      ctx.font = 'bold 13px sans-serif';
-      const label = isOk ? `Sleeve #${idx + 1} OK` : `Sleeve #${idx + 1} MISSING`;
+      // Status Tag with real-time confidence percentage
+      ctx.font = 'bold 12px sans-serif';
+      const confText = sleeve.confidence !== undefined ? ` (${sleeve.confidence}%)` : '';
+      const label = isOk ? `Sleeve #${idx + 1} OK${confText}` : `Sleeve #${idx + 1} MISSING${confText}`;
       const textWidth = ctx.measureText(label).width;
 
       const tagY = y - circleRadius - 18;
@@ -390,6 +393,37 @@ export default function InspectionView({
             </button>
           </div>
         </div>
+
+        {/* Quick Lighting / Sensitivity Preset Selector */}
+        {isInspecting && (
+          <div className="flex items-center space-x-1.5 mt-2 bg-white/95 backdrop-blur-md px-3 py-1.5 rounded-full border border-slate-300 shadow-md pointer-events-auto text-[11px] font-bold text-slate-800">
+            <span className="text-slate-500 font-semibold">Lighting:</span>
+            <button
+              onClick={() => setActiveThreshold(0.28)}
+              className={`px-2.5 py-0.5 rounded-full transition cursor-pointer ${
+                activeThreshold === 0.28 ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              Dim (28%)
+            </button>
+            <button
+              onClick={() => setActiveThreshold(0.38)}
+              className={`px-2.5 py-0.5 rounded-full transition cursor-pointer ${
+                activeThreshold === 0.38 ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              Normal (38%)
+            </button>
+            <button
+              onClick={() => setActiveThreshold(0.48)}
+              className={`px-2.5 py-0.5 rounded-full transition cursor-pointer ${
+                activeThreshold === 0.48 ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              Bright (48%)
+            </button>
+          </div>
+        )}
       </div>
 
       {/* 3. IDLE WELCOME CARD (Shown when camera not yet opened) */}

@@ -4,13 +4,13 @@ const MASTER_STORAGE_KEY = 'metal_sleeve_inspection_master_v2'; // Bump key to e
 const SETTINGS_STORAGE_KEY = 'metal_sleeve_inspection_settings';
 
 export const DEFAULT_SETTINGS = {
-  sleeveConfidenceThreshold: 0.60, // correlation / metallic score threshold for sleeve presence
-  minInlierMatches: 10,           // minimum feature inliers to lock onto part
+  sleeveConfidenceThreshold: 0.38, // sensitive to brass & steel inserts in standard factory lighting
+  minInlierMatches: 6,            // minimum feature inliers
   maxFeatures: 500,               // ORB max features
   alarmEnabled: true,             // audio alarm state
   drawPartOutline: true,          // draw bounding polygon
   drawKeypoints: false,           // debug feature points
-  inspectionIntervalMs: 120,      // interval between live CV frames (~8 FPS for smooth mobile performance)
+  inspectionIntervalMs: 50,       // 20-30 FPS quick scanning
 };
 
 export function loadMasterPart() {

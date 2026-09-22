@@ -24,24 +24,21 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
 
-  const cvEngineRef = useRef(null);
+  // Initialize CV Engine immediately so fast scanning is available from millisecond zero
+  const cvEngineRef = useRef(new CVInspectionEngine(null));
   const simulatedCanvasRef = useRef(null);
 
-  // Initialize CV Engine when OpenCV.js is ready
+  // Attach OpenCV.js when WebAssembly finishes compiling in background
   useEffect(() => {
-    if (cvReady && cv && !cvEngineRef.current) {
-      cvEngineRef.current = new CVInspectionEngine(cv);
+    if (cvReady && cv && cvEngineRef.current) {
+      cvEngineRef.current.cv = cv;
+      if (masterPart) {
+        cvEngineRef.current.loadMaster(masterPart).catch((err) => {
+          console.warn('Failed to register master part in CV engine:', err);
+        });
+      }
     }
-  }, [cvReady, cv]);
-
-  // Load / update master part into CV Engine
-  useEffect(() => {
-    if (cvReady && cvEngineRef.current && masterPart) {
-      cvEngineRef.current.loadMaster(masterPart).catch((err) => {
-        console.warn('Failed to register master part in CV engine:', err);
-      });
-    }
-  }, [cvReady, masterPart]);
+  }, [cvReady, cv, masterPart]);
 
   const handleMasterSaved = (updatedMaster) => {
     setMasterPart(updatedMaster);

@@ -5,6 +5,8 @@
  * 2. Feature Matching & Homography Alignment (ORB)
  */
 
+import { FastSleeveScanner } from './fastScanner';
+
 export class CVInspectionEngine {
   constructor(cv) {
     this.cv = cv;
@@ -17,6 +19,7 @@ export class CVInspectionEngine {
     this.bfMatcher = null;
     this.isMasterReady = false;
     this.tempCanvas = null;
+    this.fastScanner = new FastSleeveScanner();
   }
 
   /**
@@ -76,11 +79,11 @@ export class CVInspectionEngine {
   }
 
   /**
-   * Process a single video frame with ultra-fast quick scan & homography fallback
+   * Process a single video frame with ultra-fast quick scan
    */
   processFrame(sourceCanvasOrVideo, settings = {}) {
-    let width = sourceCanvasOrVideo.videoWidth || sourceCanvasOrVideo.width;
-    let height = sourceCanvasOrVideo.videoHeight || sourceCanvasOrVideo.height;
+    const width = sourceCanvasOrVideo.videoWidth || sourceCanvasOrVideo.width;
+    const height = sourceCanvasOrVideo.videoHeight || sourceCanvasOrVideo.height;
 
     if (!width || !height || width <= 0 || height <= 0) {
       return {
@@ -91,56 +94,19 @@ export class CVInspectionEngine {
       };
     }
 
-    // Processing resolution: scale down to 480p for instant 30+ FPS scanning
-    const targetDim = 480;
-    let scale = 1.0;
-    if (width > targetDim || height > targetDim) {
-      scale = targetDim / Math.max(width, height);
-    }
-    const processWidth = Math.round(width * scale);
-    const processHeight = Math.round(height * scale);
-
-    if (!this.tempCanvas) {
-      this.tempCanvas = document.createElement('canvas');
-    }
-    this.tempCanvas.width = processWidth;
-    this.tempCanvas.height = processHeight;
-    const ctx = this.tempCanvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(sourceCanvasOrVideo, 0, 0, processWidth, processHeight);
-
-    const frameImgData = ctx.getImageData(0, 0, processWidth, processHeight);
-
-    // If OpenCV is available, run computer vision pipeline
-    if (this.cv && this.cv.Mat) {
-      // 1. First attempt: Homography alignment with master if master is loaded
-      if (this.isMasterReady && this.masterMat) {
-        const homographyResult = this.tryHomographyAlignment(
-          frameImgData,
-          processWidth,
-          processHeight,
-          scale,
-          settings
-        );
-        if (homographyResult && homographyResult.partDetected) {
-          return homographyResult;
-        }
-      }
-
-      // 2. Second attempt: Direct Fast Metal Sleeve Quick Scan
-      const quickScanResult = this.runFastSleeveScanner(
-        frameImgData,
-        processWidth,
-        processHeight,
-        scale,
-        settings
-      );
-      if (quickScanResult && quickScanResult.partDetected) {
-        return quickScanResult;
-      }
+    // 1. Primary Engine: Instant Fast Sleeve Scanner (< 5ms response time)
+    const scanResult = this.fastScanner.scan(sourceCanvasOrVideo, settings, this.masterData);
+    if (scanResult && scanResult.sleeves && scanResult.sleeves.length > 0) {
+      return scanResult;
     }
 
-    // 3. Fallback / Target Guide Zone Scan (Analyzes the on-screen target reticle directly)
-    return this.runTargetReticleScan(frameImgData, processWidth, processHeight, scale, settings);
+    return {
+      status: 'SEARCHING',
+      message: 'Quick Scan Active • Point camera at part',
+      sleeves: [],
+      partDetected: false,
+      missingCount: 0,
+    };
   }
 
   /**
