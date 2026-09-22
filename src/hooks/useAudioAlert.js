@@ -2,14 +2,16 @@ import { useRef, useCallback, useState, useEffect } from 'react';
 
 /**
  * Web Audio API based alarm hook for instant shop-floor alerts.
- * Generates an attention-grabbing industrial beep (880Hz square/sine pulse)
- * repeating every 1 second when defect is detected.
+ * Supports:
+ * - Warning beep (1 missing): repeating beep every 1000ms
+ * - Continuous warning beep (2+ missing): fast urgent pulse every 300ms
  */
 export function useAudioAlert() {
   const [isMuted, setIsMuted] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const audioCtxRef = useRef(null);
   const intervalRef = useRef(null);
+  const currentSeverityRef = useRef(1);
 
   // Initialize or resume AudioContext
   const getAudioContext = useCallback(() => {
@@ -26,15 +28,15 @@ export function useAudioAlert() {
   }, []);
 
   // Single high-pitched penetrating shop-floor alert beep
-  const triggerSingleBeep = useCallback(() => {
+  const triggerSingleBeep = useCallback((durationMs = 180) => {
     if (isMuted) return;
     try {
       const ctx = getAudioContext();
       if (!ctx) return;
 
       const now = ctx.currentTime;
+      const durSec = durationMs / 1000;
       
-      // Dual oscillator for rich industrial buzzer tone
       const osc1 = ctx.createOscillator();
       const osc2 = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -45,11 +47,10 @@ export function useAudioAlert() {
       osc2.type = 'sine';
       osc2.frequency.setValueAtTime(1760, now); // Harmonic
 
-      // Envelope: Fast attack, hold, quick release (180ms total)
       gain.gain.setValueAtTime(0.001, now);
       gain.gain.exponentialRampToValueAtTime(0.8, now + 0.02);
-      gain.gain.setValueAtTime(0.8, now + 0.14);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+      gain.gain.setValueAtTime(0.8, now + (durSec - 0.04));
+      gain.gain.exponentialRampToValueAtTime(0.001, now + durSec);
 
       osc1.connect(gain);
       osc2.connect(gain);
@@ -57,21 +58,37 @@ export function useAudioAlert() {
 
       osc1.start(now);
       osc2.start(now);
-      osc1.stop(now + 0.2);
-      osc2.stop(now + 0.2);
+      osc1.stop(now + durSec + 0.02);
+      osc2.stop(now + durSec + 0.02);
     } catch (e) {
       console.warn('Audio alert error:', e);
     }
   }, [isMuted, getAudioContext]);
 
-  // Start repeating alarm (every 1 second) while defect remains visible
-  const startAlarm = useCallback(() => {
-    if (intervalRef.current) return; // already active
+  // Start repeating alarm
+  // missingCount = 1 -> 1 beep per second
+  // missingCount >= 2 -> continuous urgent beep every 300ms
+  const startAlarm = useCallback((missingCount = 1) => {
+    const isUrgent = missingCount >= 2;
+    const intervalMs = isUrgent ? 320 : 1000;
+
+    // If already running with same severity, don't restart
+    if (intervalRef.current && currentSeverityRef.current === missingCount) {
+      return;
+    }
+
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+
+    currentSeverityRef.current = missingCount;
     setIsPlaying(true);
-    triggerSingleBeep();
+    triggerSingleBeep(isUrgent ? 140 : 180);
+
     intervalRef.current = setInterval(() => {
-      triggerSingleBeep();
-    }, 1000);
+      triggerSingleBeep(isUrgent ? 140 : 180);
+    }, intervalMs);
   }, [triggerSingleBeep]);
 
   // Stop alarm immediately when defect disappears or inspection stops

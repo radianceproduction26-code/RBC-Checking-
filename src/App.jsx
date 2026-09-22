@@ -10,7 +10,8 @@ import { useCamera } from './hooks/useCamera';
 import { useAudioAlert } from './hooks/useAudioAlert';
 
 import { CVInspectionEngine } from './services/cvEngine';
-import { loadMasterPart, loadSettings, DEFAULT_SETTINGS } from './services/storage';
+import { loadMasterProfile, saveMasterProfile } from './services/masterProfile';
+import { loadSettings, DEFAULT_SETTINGS } from './services/storage';
 
 export default function App() {
   const { isLoaded: cvReady, loadProgress, cv } = useOpenCV();
@@ -18,7 +19,7 @@ export default function App() {
   const audioHook = useAudioAlert();
 
   const [activeTab, setActiveTab] = useState('INSPECTION'); // 'INSPECTION' | 'MASTER_SETUP'
-  const [masterPart, setMasterPart] = useState(() => loadMasterPart());
+  const [masterProfile, setMasterProfile] = useState(() => loadMasterProfile());
   const [settings, setSettings] = useState(() => loadSettings());
   const [isSimulatorOpen, setIsSimulatorOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -32,18 +33,18 @@ export default function App() {
   useEffect(() => {
     if (cvReady && cv && cvEngineRef.current) {
       cvEngineRef.current.cv = cv;
-      if (masterPart) {
-        cvEngineRef.current.loadMaster(masterPart).catch((err) => {
-          console.warn('Failed to register master part in CV engine:', err);
+      if (masterProfile) {
+        cvEngineRef.current.loadMasterProfile(masterProfile).catch((err) => {
+          console.warn('Failed to register master profile in CV engine:', err);
         });
       }
     }
-  }, [cvReady, cv, masterPart]);
+  }, [cvReady, cv, masterProfile]);
 
-  const handleMasterSaved = (updatedMaster) => {
-    setMasterPart(updatedMaster);
+  const handleProfileSaved = (updatedProfile) => {
+    setMasterProfile(updatedProfile);
     if (cvEngineRef.current) {
-      cvEngineRef.current.loadMaster(updatedMaster);
+      cvEngineRef.current.loadMasterProfile(updatedProfile);
     }
     setActiveTab('INSPECTION');
   };
@@ -57,7 +58,7 @@ export default function App() {
       <Header
         cvReady={cvReady}
         cvStatus={loadProgress}
-        masterPart={masterPart}
+        masterPart={masterProfile}
         isMuted={audioHook.isMuted}
         onToggleMute={audioHook.toggleMute}
         onOpenSimulator={() => setIsSimulatorOpen(true)}
@@ -72,7 +73,7 @@ export default function App() {
           <InspectionView
             cvEngine={cvEngineRef.current}
             cvReady={cvReady}
-            masterPart={masterPart}
+            masterProfile={masterProfile}
             onOpenMasterSetup={() => setActiveTab('MASTER_SETUP')}
             onOpenSimulator={() => setIsSimulatorOpen(true)}
             useCameraHook={cameraHook}
@@ -83,8 +84,8 @@ export default function App() {
           />
         ) : (
           <MasterSetup
-            currentMaster={masterPart}
-            onMasterSaved={handleMasterSaved}
+            currentProfile={masterProfile}
+            onProfileSaved={handleProfileSaved}
             onBack={() => setActiveTab('INSPECTION')}
             cvEngine={cvEngineRef.current}
             cvReady={cvReady}

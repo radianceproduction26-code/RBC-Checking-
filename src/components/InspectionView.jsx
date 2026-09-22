@@ -2,13 +2,14 @@ import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { 
   Play, Square, RefreshCw, AlertTriangle, CheckCircle, 
   Wrench, Camera, Zap, AlertCircle, Maximize2, Minimize2, 
-  Scan, Sparkles, Volume2, VolumeX
+  Scan, Sparkles, Volume2, VolumeX, Bug
 } from 'lucide-react';
+import DebugPanel from './DebugPanel';
 
 export default function InspectionView({
   cvEngine,
   cvReady,
-  masterPart,
+  masterProfile,
   onOpenMasterSetup,
   onOpenSimulator,
   useCameraHook,
@@ -30,13 +31,21 @@ export default function InspectionView({
 
   const [isInspecting, setIsInspecting] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isDebugMode, setIsDebugMode] = useState(false);
   const [activeThreshold, setActiveThreshold] = useState(settings?.sleeveConfidenceThreshold ?? 0.38);
+
   const [inspectionResult, setInspectionResult] = useState({
+    partDetected: false,
+    matchedFeatures: 0,
+    sleeve1: 'unknown',
+    sleeve2: 'unknown',
+    sleeve3: 'unknown',
+    result: 'IDLE',
     status: 'IDLE',
     message: 'Press "Start Inspection" to begin',
     sleeves: [],
-    partDetected: false,
     missingCount: 0,
+    debug: {},
   });
 
   const containerRef = useRef(null);
@@ -44,7 +53,7 @@ export default function InspectionView({
   const animationFrameIdRef = useRef(null);
   const lastProcessTimeRef = useRef(0);
 
-  const totalTargetSleeves = masterPart?.sleeves?.length || 3;
+  const totalTargetSleeves = masterProfile?.sleeves?.length || 3;
 
   // Cleanup on unmount
   useEffect(() => {
@@ -56,19 +65,20 @@ export default function InspectionView({
     };
   }, [stopAlarm]);
 
-  // Audio alarm triggering based on inspection result
+  // Audio alarm triggering: 1 missing -> warning beep; 2+ missing -> continuous urgent beep
   useEffect(() => {
     if (!isInspecting) {
       stopAlarm();
       return;
     }
 
-    if (inspectionResult.status === 'FAIL') {
-      startAlarm();
+    if (inspectionResult.result === 'FAIL' || inspectionResult.status === 'FAIL') {
+      const missing = inspectionResult.missingCount || 1;
+      startAlarm(missing);
     } else {
       stopAlarm();
     }
-  }, [inspectionResult.status, isInspecting, startAlarm, stopAlarm]);
+  }, [inspectionResult.result, inspectionResult.status, inspectionResult.missingCount, isInspecting, startAlarm, stopAlarm]);
 
   // Start Inspection flow with full camera activation
   const handleStartInspection = async () => {
@@ -79,11 +89,17 @@ export default function InspectionView({
     }
     setIsInspecting(true);
     setInspectionResult({
-      status: 'SEARCHING',
-      message: 'Quick Scan Active • Point camera at part',
-      sleeves: [],
       partDetected: false,
+      matchedFeatures: 0,
+      sleeve1: 'unknown',
+      sleeve2: 'unknown',
+      sleeve3: 'unknown',
+      result: 'SEARCHING',
+      status: 'SEARCHING',
+      message: 'ORB Feature Alignment Active • Point camera at part',
+      sleeves: [],
       missingCount: 0,
+      debug: {},
     });
   };
 
@@ -95,11 +111,17 @@ export default function InspectionView({
       cancelAnimationFrame(animationFrameIdRef.current);
     }
     setInspectionResult({
+      partDetected: false,
+      matchedFeatures: 0,
+      sleeve1: 'unknown',
+      sleeve2: 'unknown',
+      sleeve3: 'unknown',
+      result: 'IDLE',
       status: 'IDLE',
       message: 'Inspection stopped',
       sleeves: [],
-      partDetected: false,
       missingCount: 0,
+      debug: {},
     });
 
     const canvas = overlayCanvasRef.current;
@@ -109,17 +131,7 @@ export default function InspectionView({
     }
   };
 
-  // Single Quick Scan (Immediate one-tap scan)
-  const handleQuickScanNow = () => {
-    initAudio();
-    if (!isCameraActive && !isSimulating) {
-      handleStartInspection();
-      return;
-    }
-    processCurrentFrame();
-  };
-
-  // Process one frame
+  // Process one frame using requestAnimationFrame()
   const processCurrentFrame = useCallback(() => {
     if (!cvEngine) return;
     const sourceElement = isSimulating ? simulatedCanvas : videoRef.current;
@@ -130,7 +142,10 @@ export default function InspectionView({
     if (!w || !h || w <= 0 || h <= 0) return;
 
     try {
-      const activeSettings = { ...settings, sleeveConfidenceThreshold: activeThreshold };
+      const activeSettings = {
+        ...settings,
+        sleeveConfidenceThreshold: activeThreshold,
+      };
       const result = cvEngine.processFrame(sourceElement, activeSettings);
       if (result) {
         setInspectionResult(result);
@@ -139,14 +154,14 @@ export default function InspectionView({
     } catch (err) {
       console.warn('Scan frame error:', err);
     }
-  }, [cvEngine, isSimulating, simulatedCanvas, videoRef, settings, activeThreshold]);
+  }, [cvEngine, isSimulating, simulatedCanvas, videoRef, settings, activeThreshold, isDebugMode]);
 
-  // Continuous Inspection Loop
+  // Inspection Loop driven by requestAnimationFrame()
   const runInspectionLoop = useCallback(() => {
     if (!isInspecting) return;
 
     const now = performance.now();
-    const interval = settings?.inspectionIntervalMs || 80;
+    const interval = settings?.inspectionIntervalMs || 60; // 15-20 FPS target
 
     if (now - lastProcessTimeRef.current >= interval) {
       lastProcessTimeRef.current = now;
@@ -171,7 +186,7 @@ export default function InspectionView({
     };
   }, [isInspecting, runInspectionLoop]);
 
-  // Toggle Fullscreen on device
+  // Toggle Fullscreen
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
       containerRef.current?.requestFullscreen?.().then(() => setIsFullscreen(true)).catch(() => {});
@@ -180,7 +195,7 @@ export default function InspectionView({
     }
   };
 
-  // Draw HUD Overlays (Reticle, Green/Red circles, labels)
+  // Draw HUD Overlays, Homography Polygon, and Debug Info
   const drawOverlay = (result, source) => {
     const canvas = overlayCanvasRef.current;
     if (!canvas) return;
@@ -199,57 +214,72 @@ export default function InspectionView({
     const cx = canvas.width / 2;
     const cy = canvas.height / 2;
 
-    // Draw Sleek Alignment Reticle
-    const reticleW = Math.min(canvas.width, canvas.height) * 0.75;
-    const reticleH = reticleW * 0.7;
+    // 1. Draw Homography Bounding Box if Part is Detected
+    if (result.partDetected && result.debug?.corners && result.debug.corners.length === 4) {
+      const corners = result.debug.corners;
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(corners[0].x, corners[0].y);
+      for (let i = 1; i < 4; i++) {
+        ctx.lineTo(corners[i].x, corners[i].y);
+      }
+      ctx.closePath();
+      ctx.strokeStyle = 'rgba(14, 165, 233, 0.95)';
+      ctx.lineWidth = 4;
+      ctx.setLineDash([8, 4]);
+      ctx.stroke();
 
-    ctx.save();
-    // Corner target brackets
-    ctx.strokeStyle = result.partDetected ? 'rgba(14, 165, 233, 0.9)' : 'rgba(217, 119, 6, 0.8)';
-    ctx.lineWidth = 4;
-    const cornerSize = 28;
+      ctx.fillStyle = 'rgba(14, 165, 233, 0.12)';
+      ctx.fill();
 
-    const left = cx - reticleW / 2;
-    const right = cx + reticleW / 2;
-    const top = cy - reticleH / 2;
-    const bottom = cy + reticleH / 2;
+      // Label on top of bounding box
+      ctx.font = 'bold 12px sans-serif';
+      ctx.fillStyle = '#0284c7';
+      ctx.fillText('HOMOGRAPHY ALIGNED PART', corners[0].x, corners[0].y - 8);
+      ctx.restore();
+    } else if (!result.partDetected) {
+      // Draw Search Reticle when searching for part
+      const reticleW = Math.min(canvas.width, canvas.height) * 0.75;
+      const reticleH = reticleW * 0.7;
 
-    // Top-Left
-    ctx.beginPath();
-    ctx.moveTo(left, top + cornerSize);
-    ctx.lineTo(left, top);
-    ctx.lineTo(left + cornerSize, top);
-    ctx.stroke();
+      ctx.save();
+      ctx.strokeStyle = 'rgba(217, 119, 6, 0.85)';
+      ctx.lineWidth = 3.5;
+      const cornerSize = 28;
 
-    // Top-Right
-    ctx.beginPath();
-    ctx.moveTo(right - cornerSize, top);
-    ctx.lineTo(right, top);
-    ctx.lineTo(right, top + cornerSize);
-    ctx.stroke();
+      const left = cx - reticleW / 2;
+      const right = cx + reticleW / 2;
+      const top = cy - reticleH / 2;
+      const bottom = cy + reticleH / 2;
 
-    // Bottom-Left
-    ctx.beginPath();
-    ctx.moveTo(left, bottom - cornerSize);
-    ctx.lineTo(left, bottom);
-    ctx.lineTo(left + cornerSize, bottom);
-    ctx.stroke();
+      // Reticle corner brackets
+      ctx.beginPath();
+      ctx.moveTo(left, top + cornerSize); ctx.lineTo(left, top); ctx.lineTo(left + cornerSize, top);
+      ctx.moveTo(right - cornerSize, top); ctx.lineTo(right, top); ctx.lineTo(right, top + cornerSize);
+      ctx.moveTo(left, bottom - cornerSize); ctx.lineTo(left, bottom); ctx.lineTo(left + cornerSize, bottom);
+      ctx.moveTo(right - cornerSize, bottom); ctx.lineTo(right, bottom); ctx.lineTo(right, bottom - cornerSize);
+      ctx.stroke();
 
-    // Bottom-Right
-    ctx.beginPath();
-    ctx.moveTo(right - cornerSize, bottom);
-    ctx.lineTo(right, bottom);
-    ctx.lineTo(right, bottom - cornerSize);
-    ctx.stroke();
+      ctx.font = 'bold 13px sans-serif';
+      ctx.fillStyle = 'rgba(217, 119, 6, 0.95)';
+      ctx.textAlign = 'center';
+      ctx.fillText('POINT CAMERA AT PLASTIC PART', cx, top - 12);
+      ctx.restore();
+    }
 
-    // Subtle guide text
-    ctx.font = 'bold 13px sans-serif';
-    ctx.fillStyle = result.partDetected ? 'rgba(14, 165, 233, 0.95)' : 'rgba(217, 119, 6, 0.95)';
-    ctx.textAlign = 'center';
-    ctx.fillText(result.partDetected ? 'PART DETECTED • 3-SLEEVE SCAN' : 'ALIGN 3-SLEEVE PART HERE', cx, top - 12);
-    ctx.restore();
+    // 2. DEBUG MODE: Draw Detected ORB Keypoints as Neon Dots
+    if (isDebugMode && result.debug?.keypoints && result.debug.keypoints.length > 0) {
+      ctx.save();
+      for (const kp of result.debug.keypoints) {
+        ctx.beginPath();
+        ctx.arc(kp.x, kp.y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(234, 179, 8, 0.85)';
+        ctx.fill();
+      }
+      ctx.restore();
+    }
 
-    // Draw Sleeves
+    // 3. Draw Sleeve Inspection Regions (Position A, B, C)
     result.sleeves.forEach((sleeve, idx) => {
       const { x, y, radius, present } = sleeve;
       const isOk = present;
@@ -260,11 +290,11 @@ export default function InspectionView({
       // Outer glow
       ctx.beginPath();
       ctx.arc(x, y, circleRadius + 7, 0, Math.PI * 2);
-      ctx.strokeStyle = isOk ? 'rgba(16, 185, 129, 0.45)' : 'rgba(239, 68, 68, 0.8)';
+      ctx.strokeStyle = isOk ? 'rgba(16, 185, 129, 0.45)' : 'rgba(239, 68, 68, 0.85)';
       ctx.lineWidth = 4;
       ctx.stroke();
 
-      // Main Circle
+      // Main Circle: GREEN for PRESENT, RED for MISSING
       ctx.beginPath();
       ctx.arc(x, y, circleRadius, 0, Math.PI * 2);
       ctx.strokeStyle = isOk ? '#059669' : '#dc2626';
@@ -280,10 +310,11 @@ export default function InspectionView({
       ctx.fillStyle = '#ffffff';
       ctx.fillText(isOk ? '✓' : '✕', x, y);
 
-      // Status Tag with real-time confidence percentage
+      // Status Tag with Confidence & Position Name
       ctx.font = 'bold 12px sans-serif';
+      const posName = sleeve.name || `Position ${String.fromCharCode(65 + idx)}`;
       const confText = sleeve.confidence !== undefined ? ` (${sleeve.confidence}%)` : '';
-      const label = isOk ? `Sleeve #${idx + 1} OK${confText}` : `Sleeve #${idx + 1} MISSING${confText}`;
+      const label = isOk ? `${posName}: OK${confText}` : `${posName}: MISSING${confText}`;
       const textWidth = ctx.measureText(label).width;
 
       const tagY = y - circleRadius - 18;
@@ -297,11 +328,22 @@ export default function InspectionView({
       ctx.fillStyle = '#ffffff';
       ctx.fillText(label, x, tagY);
 
+      // In Debug Mode: display individual metric pill below sleeve
+      if (isDebugMode && sleeve.metrics) {
+        ctx.font = 'bold 10px monospace';
+        const metricStr = `B:${Math.round(sleeve.metrics.metalBrightness * 100)} E:${Math.round(sleeve.metrics.edgeDensity * 100)} C:${Math.round(sleeve.metrics.circularGeometry * 100)}`;
+        const mWidth = ctx.measureText(metricStr).width;
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+        ctx.fillRect(x - mWidth / 2 - 4, y + circleRadius + 6, mWidth + 8, 16);
+        ctx.fillStyle = '#f8fafc';
+        ctx.fillText(metricStr, x, y + circleRadius + 18);
+      }
+
       ctx.restore();
     });
   };
 
-  const status = inspectionResult.status;
+  const status = inspectionResult.result || inspectionResult.status;
   const presentCount = inspectionResult.sleeves.filter((s) => s.present).length;
 
   return (
@@ -320,25 +362,25 @@ export default function InspectionView({
         }`}
       />
 
-      {/* Virtual Simulator Canvas (if simulating) */}
+      {/* Virtual Simulator Stream (if simulating) */}
       {isSimulating && (
         <div className="absolute inset-0 w-full h-full flex items-center justify-center bg-slate-900 z-0">
           <div className="text-white text-xs font-bold bg-indigo-600/90 px-3 py-1.5 rounded-full absolute top-4 left-4 z-20 shadow">
-            ● Virtual Test Bench Stream Active (3 Sleeves)
+            ● Virtual Shop Floor Test Bench Active
           </div>
         </div>
       )}
 
-      {/* HUD Overlay Canvas (Positioned exactly over video) */}
+      {/* HUD Canvas Overlay */}
       <canvas
         ref={overlayCanvasRef}
         className="absolute inset-0 w-full h-full object-cover pointer-events-none z-10"
       />
 
-      {/* Fast Scanline Effect */}
+      {/* Scanline Effect */}
       {isInspecting && <div className="scanline-effect z-10" />}
 
-      {/* 2. FLOATING TOP RESULT BANNER (Heads-Up Display) */}
+      {/* 2. FLOATING TOP RESULT BANNER */}
       <div className="absolute top-3 left-3 right-3 z-30 flex flex-col items-center pointer-events-none">
         <div
           className={`w-full max-w-xl py-3 px-4 rounded-2xl transition-all duration-200 shadow-2xl flex items-center justify-between pointer-events-auto backdrop-blur-md ${
@@ -359,7 +401,7 @@ export default function InspectionView({
 
             <div>
               <span className="text-2xl sm:text-4xl font-black tracking-wider drop-shadow-sm block leading-tight">
-                {status === 'PASS' ? 'PASS' : status === 'FAIL' ? 'FAIL' : status === 'SEARCHING' ? 'SCANNING...' : 'READY'}
+                {status === 'PASS' ? 'PASS' : status === 'FAIL' ? 'FAIL' : status === 'SEARCHING' ? 'ALIGNING...' : 'READY'}
               </span>
               <span className="text-xs sm:text-sm font-bold opacity-95 block">
                 {status === 'PASS'
@@ -367,26 +409,38 @@ export default function InspectionView({
                   : status === 'FAIL'
                   ? `Missing Sleeve Detected (${inspectionResult.missingCount} Missing)`
                   : status === 'SEARCHING'
-                  ? 'Quick Scan Active • Point at Part'
+                  ? 'ORB Feature Alignment • Point at Part'
                   : 'Press "Start Inspection" for Fullscreen Camera'}
               </span>
             </div>
           </div>
 
-          {/* Quick HUD Action Buttons */}
+          {/* HUD Utility Buttons */}
           <div className="flex items-center space-x-1.5">
+            {/* Debug Mode Toggle */}
+            <button
+              onClick={() => setIsDebugMode(!isDebugMode)}
+              className={`p-2 rounded-xl border transition cursor-pointer ${
+                isDebugMode
+                  ? 'bg-indigo-600 text-white border-indigo-400 shadow-sm'
+                  : 'bg-white/80 text-slate-700 border-slate-200 hover:bg-white'
+              }`}
+              title="Toggle Debug Mode"
+            >
+              <Bug className="w-4 h-4" />
+            </button>
             <button
               onClick={toggleMute}
-              className={`p-2 rounded-xl border transition ${
+              className={`p-2 rounded-xl border transition cursor-pointer ${
                 isMuted ? 'bg-rose-100 text-rose-700 border-rose-300' : 'bg-white/80 text-slate-700 border-slate-200'
               }`}
-              title={isMuted ? 'Unmute' : 'Mute'}
+              title={isMuted ? 'Unmute Alarm' : 'Mute Alarm'}
             >
               {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
             </button>
             <button
               onClick={toggleFullscreen}
-              className="p-2 rounded-xl bg-white/80 text-slate-700 border border-slate-200 hover:bg-white transition"
+              className="p-2 rounded-xl bg-white/80 text-slate-700 border border-slate-200 hover:bg-white transition cursor-pointer"
               title="Toggle Fullscreen"
             >
               {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
@@ -394,14 +448,14 @@ export default function InspectionView({
           </div>
         </div>
 
-        {/* Quick Lighting / Sensitivity Preset Selector */}
+        {/* Sensitivity / Lighting Presets */}
         {isInspecting && (
           <div className="flex items-center space-x-1.5 mt-2 bg-white/95 backdrop-blur-md px-3 py-1.5 rounded-full border border-slate-300 shadow-md pointer-events-auto text-[11px] font-bold text-slate-800">
             <span className="text-slate-500 font-semibold">Lighting:</span>
             <button
               onClick={() => setActiveThreshold(0.28)}
               className={`px-2.5 py-0.5 rounded-full transition cursor-pointer ${
-                activeThreshold === 0.28 ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-100'
+                activeThreshold === 0.28 ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100'
               }`}
             >
               Dim (28%)
@@ -409,7 +463,7 @@ export default function InspectionView({
             <button
               onClick={() => setActiveThreshold(0.38)}
               className={`px-2.5 py-0.5 rounded-full transition cursor-pointer ${
-                activeThreshold === 0.38 ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-100'
+                activeThreshold === 0.38 ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100'
               }`}
             >
               Normal (38%)
@@ -417,7 +471,7 @@ export default function InspectionView({
             <button
               onClick={() => setActiveThreshold(0.48)}
               className={`px-2.5 py-0.5 rounded-full transition cursor-pointer ${
-                activeThreshold === 0.48 ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:bg-slate-100'
+                activeThreshold === 0.48 ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100'
               }`}
             >
               Bright (48%)
@@ -426,7 +480,14 @@ export default function InspectionView({
         )}
       </div>
 
-      {/* 3. IDLE WELCOME CARD (Shown when camera not yet opened) */}
+      {/* 3. DEBUG MODE OVERLAY PANEL */}
+      <DebugPanel
+        inspectionResult={inspectionResult}
+        isVisible={isDebugMode && isInspecting}
+        onToggleVisible={() => setIsDebugMode(false)}
+      />
+
+      {/* 4. IDLE WELCOME CARD */}
       {!isInspecting && !isCameraActive && !isSimulating && (
         <div className="absolute inset-0 z-20 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
           <div className="flex flex-col items-center justify-center p-6 text-center max-w-sm w-full bg-white rounded-3xl shadow-2xl border border-slate-200">
@@ -437,12 +498,12 @@ export default function InspectionView({
                 className="h-12 w-auto max-w-[160px] object-contain"
               />
             </div>
-            <h3 className="text-xl font-black text-slate-900 mb-1">Radiance Polymer Inspection</h3>
+            <h3 className="text-xl font-black text-slate-900 mb-1">Radiance Polymer Quality Control</h3>
             <p className="text-xs font-bold text-indigo-700 uppercase tracking-wider mb-2">
-              Full-Screen Quick Scanner (3 Sleeves)
+              ORB Homography Inspection (3 Sleeves)
             </p>
             <p className="text-xs text-slate-500 mb-5 leading-relaxed">
-              Opens full-screen mobile camera with real-time detection of metal sleeves and missing sleeve audio alarms.
+              Multi-image trained ORB feature alignment detects sleeves under any rotation (0°–360°), distance, or handheld tilt.
             </p>
 
             <button
@@ -450,7 +511,7 @@ export default function InspectionView({
               className="w-full py-3.5 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-base shadow-lg shadow-emerald-600/30 transition flex items-center justify-center space-x-2 cursor-pointer active:scale-95 mb-2.5"
             >
               <Camera className="w-5 h-5" />
-              <span>Open Full-Screen Camera</span>
+              <span>Start Live Inspection</span>
             </button>
 
             <button
@@ -463,7 +524,7 @@ export default function InspectionView({
         </div>
       )}
 
-      {/* Camera Error Message */}
+      {/* Camera Error Alert */}
       {cameraError && (
         <div className="absolute top-20 left-4 right-4 z-40 p-4 rounded-2xl bg-rose-50 border-2 border-rose-400 text-rose-900 text-xs shadow-2xl flex items-center space-x-3">
           <AlertCircle className="w-6 h-6 text-rose-600 shrink-0" />
@@ -474,38 +535,38 @@ export default function InspectionView({
         </div>
       )}
 
-      {/* 4. FLOATING BOTTOM CONTROL BAR */}
+      {/* 5. FLOATING BOTTOM CONTROL BAR */}
       <div className="absolute bottom-4 left-3 right-3 z-30 flex justify-center pointer-events-none">
         <div className="w-full max-w-xl p-2.5 sm:p-3 rounded-2xl bg-white/95 backdrop-blur-md border border-slate-200 shadow-2xl flex items-center justify-between gap-2 pointer-events-auto">
-          {/* Quick Scan One-Tap Button */}
-          <button
-            onClick={handleQuickScanNow}
-            className="flex-1 flex items-center justify-center space-x-1.5 py-3 px-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs sm:text-sm shadow-sm transition active:scale-95 cursor-pointer"
-          >
-            <Scan className="w-4 h-4" />
-            <span>Quick Scan</span>
-          </button>
-
           {/* Start/Stop Toggle Button */}
           {isInspecting ? (
             <button
               onClick={handleStopInspection}
-              className="flex-1 flex items-center justify-center space-x-1.5 py-3 px-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-black text-xs sm:text-sm shadow-sm transition active:scale-95 cursor-pointer"
+              className="flex-1 flex items-center justify-center space-x-1.5 py-3 px-3 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-black text-xs sm:text-sm shadow-sm transition active:scale-95 cursor-pointer"
             >
               <Square className="w-4 h-4 fill-current" />
-              <span>Stop</span>
+              <span>Stop Inspection</span>
             </button>
           ) : (
             <button
               onClick={handleStartInspection}
-              className="flex-1 flex items-center justify-center space-x-1.5 py-3 px-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs sm:text-sm shadow-sm transition active:scale-95 cursor-pointer"
+              className="flex-1 flex items-center justify-center space-x-1.5 py-3 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs sm:text-sm shadow-sm transition active:scale-95 cursor-pointer"
             >
               <Play className="w-4 h-4 fill-current" />
-              <span>Live Inspect</span>
+              <span>Start Inspection</span>
             </button>
           )}
 
-          {/* Flip Camera Button */}
+          {/* Quick Snap Inspection */}
+          <button
+            onClick={processCurrentFrame}
+            className="p-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white transition active:scale-95 cursor-pointer"
+            title="Force Frame Inspection"
+          >
+            <Scan className="w-4 h-4" />
+          </button>
+
+          {/* Flip Camera */}
           <button
             onClick={switchCamera}
             disabled={!isCameraActive || isSimulating}
@@ -515,14 +576,14 @@ export default function InspectionView({
             <RefreshCw className="w-4 h-4" />
           </button>
 
-          {/* Master Setup Button */}
+          {/* Master Learning Setup */}
           <button
             onClick={() => {
               handleStopInspection();
               onOpenMasterSetup();
             }}
             className="p-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-indigo-700 border border-slate-200 transition active:scale-95 cursor-pointer"
-            title="Master Setup"
+            title="Master Learning Setup"
           >
             <Wrench className="w-4 h-4" />
           </button>
