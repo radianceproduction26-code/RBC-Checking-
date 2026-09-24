@@ -35,24 +35,24 @@ export default function SettingsModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm select-none">
-      <div className="bg-white border border-slate-300 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-sm select-none">
+      <div className="bg-white border border-slate-300 rounded-2xl w-full max-w-lg max-h-[90dvh] shadow-2xl overflow-hidden flex flex-col">
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-slate-200">
+        <div className="flex items-center justify-between p-3.5 sm:p-4 border-b border-slate-200 shrink-0">
           <div className="flex items-center space-x-2">
             <Sliders className="w-5 h-5 text-indigo-600" />
-            <h3 className="font-black text-slate-900 text-base">Inspection System Settings</h3>
+            <h3 className="font-black text-slate-900 text-sm sm:text-base">Inspection System Settings</h3>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg bg-slate-100 text-slate-500 hover:text-slate-800 transition"
+            className="p-1.5 rounded-lg bg-slate-100 text-slate-500 hover:text-slate-800 transition cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Content */}
-        <div className="p-4 space-y-4 text-xs">
+        <div className="p-3.5 sm:p-4 space-y-4 text-xs overflow-y-auto flex-1">
           {saved && (
             <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-800 font-bold flex items-center space-x-2 shadow-sm">
               <Check className="w-4 h-4 text-emerald-600" />

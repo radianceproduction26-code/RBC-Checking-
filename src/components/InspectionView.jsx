@@ -3,7 +3,7 @@ import {
   Play, Square, RefreshCw, AlertTriangle, CheckCircle, 
   Wrench, Camera, Zap, AlertCircle, Maximize2, Minimize2, 
   Scan, Sparkles, Volume2, VolumeX, Bug, Lock, ArrowRight,
-  RotateCcw, Sliders, Check, ShieldCheck, Timer
+  RotateCcw, Sliders, Check, ShieldCheck, Timer, Eye
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import DebugPanel from './DebugPanel';
@@ -40,10 +40,9 @@ export default function InspectionView({
     toggleMute 
   } = useAudioAlertHook;
 
-  // Scan Modes: 'auto_lock' | 'manual' | 'continuous'
-  const [scanMode, setScanMode] = useState(settings?.scanMode || 'auto_lock');
+  // Scan Mode: 'manual' (Tap to Scan, Recommended) | 'auto_lock' (Auto-Detect on Steady Part)
+  const [scanMode, setScanMode] = useState(settings?.scanMode || 'manual');
   const [scanSpeedMs, setScanSpeedMs] = useState(settings?.inspectionIntervalMs || 220);
-  const [lockDurationMs, setLockDurationMs] = useState(settings?.lockDurationMs || 2500);
 
   const [isInspecting, setIsInspecting] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -52,10 +51,9 @@ export default function InspectionView({
 
   // Inspection State Machine: 'IDLE' | 'POSITIONING' | 'STABILIZING' | 'LOCKED'
   const [cycleState, setCycleState] = useState('IDLE');
-  const [lockProgress, setLockProgress] = useState(0); // 0..100% for locked timer bar
   const [stabilityCounter, setStabilityCounter] = useState(0); // consecutive stable frames
 
-  // Shift QC Statistics
+  // Shift QC Statistics (counted strictly once per unique locked part verdict)
   const [qcStats, setQcStats] = useState({
     total: 0,
     passed: 0,
@@ -80,8 +78,6 @@ export default function InspectionView({
   const overlayCanvasRef = useRef(null);
   const animationFrameIdRef = useRef(null);
   const lastProcessTimeRef = useRef(0);
-  const lockTimerRef = useRef(null);
-  const lockStartTimeRef = useRef(0);
   const stableFramesRequired = settings?.stabilityFrames || 3;
 
   const totalTargetSleeves = masterProfile?.sleeves?.length || 3;
@@ -91,7 +87,6 @@ export default function InspectionView({
     return () => {
       stopAlarm();
       if (animationFrameIdRef.current) cancelAnimationFrame(animationFrameIdRef.current);
-      if (lockTimerRef.current) clearInterval(lockTimerRef.current);
     };
   }, [stopAlarm]);
 
@@ -105,7 +100,6 @@ export default function InspectionView({
     setIsInspecting(true);
     setCycleState('POSITIONING');
     setStabilityCounter(0);
-    setLockProgress(0);
 
     setInspectionResult({
       partDetected: false,
@@ -115,7 +109,7 @@ export default function InspectionView({
       sleeve3: 'unknown',
       result: 'SEARCHING',
       status: 'SEARCHING',
-      message: 'Position PA6-GF50 Part in Target Reticle',
+      message: 'Position PA6-GF50 Part in Center Reticle',
       sleeves: [],
       missingCount: 0,
       debug: {},
@@ -127,15 +121,10 @@ export default function InspectionView({
     setIsInspecting(false);
     setCycleState('IDLE');
     setStabilityCounter(0);
-    setLockProgress(0);
     stopAlarm();
 
     if (animationFrameIdRef.current) {
       cancelAnimationFrame(animationFrameIdRef.current);
-    }
-    if (lockTimerRef.current) {
-      clearInterval(lockTimerRef.current);
-      lockTimerRef.current = null;
     }
 
     setInspectionResult({
@@ -159,33 +148,41 @@ export default function InspectionView({
     }
   };
 
-  // Unlock and prepare for the next part
+  // Unlock and prepare for the NEXT PART (Operator explicitly clicks "Next Part")
   const unlockAndReadyNextPart = useCallback(() => {
-    if (lockTimerRef.current) {
-      clearInterval(lockTimerRef.current);
-      lockTimerRef.current = null;
-    }
-    setLockProgress(0);
     setStabilityCounter(0);
     setCycleState('POSITIONING');
     stopAlarm();
 
-    setInspectionResult((prev) => ({
-      ...prev,
+    const canvas = overlayCanvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    setInspectionResult({
+      partDetected: false,
+      matchedFeatures: 0,
+      sleeve1: 'unknown',
+      sleeve2: 'unknown',
+      sleeve3: 'unknown',
       result: 'SEARCHING',
       status: 'SEARCHING',
-      message: 'Ready for Next Part • Align in Reticle',
-    }));
+      message: 'Ready for Next Part • Align in Center Reticle',
+      sleeves: [],
+      missingCount: 0,
+      debug: {},
+    });
   }, [stopAlarm]);
 
-  // Lock a final verdict on screen
+  // Lock a final verdict on screen (STOPS and holds until operator clicks "Next Part")
   const lockVerdict = useCallback((evalResult) => {
     setCycleState('LOCKED');
     setInspectionResult(evalResult);
 
     const isPass = evalResult.status === 'PASS' || evalResult.result === 'PASS';
 
-    // Update Statistics
+    // Update Shift QC Statistics strictly once per part
     setQcStats((prev) => ({
       total: prev.total + 1,
       passed: prev.passed + (isPass ? 1 : 0),
@@ -197,37 +194,20 @@ export default function InspectionView({
       triggerPassChime();
       try {
         confetti({
-          particleCount: 28,
+          particleCount: 30,
           spread: 60,
-          origin: { y: 0.2 },
+          origin: { y: 0.25 },
           colors: ['#10b981', '#059669', '#34d399', '#ffffff'],
         });
       } catch (e) {}
     } else {
       triggerFailBuzz();
     }
+    // Note: NEVER set any auto-clearing timer here!
+    // As requested: The verdict STAYS solid on screen until operator clicks "Next Part"!
+  }, [triggerPassChime, triggerFailBuzz]);
 
-    // Auto-Lock Timer Countdown Bar
-    if (scanMode === 'auto_lock') {
-      const startTime = performance.now();
-      lockStartTimeRef.current = startTime;
-      if (lockTimerRef.current) clearInterval(lockTimerRef.current);
-
-      lockTimerRef.current = setInterval(() => {
-        const elapsed = performance.now() - lockStartTimeRef.current;
-        const progress = Math.min(100, (elapsed / lockDurationMs) * 100);
-        setLockProgress(progress);
-
-        if (elapsed >= lockDurationMs) {
-          clearInterval(lockTimerRef.current);
-          lockTimerRef.current = null;
-          unlockAndReadyNextPart();
-        }
-      }, 50);
-    }
-  }, [scanMode, lockDurationMs, triggerPassChime, triggerFailBuzz, unlockAndReadyNextPart]);
-
-  // Manual Trigger Scan Execution (One definitive high-confidence snapshot)
+  // Manual Trigger Scan Execution (Analyzes the part in reticle, alerts if empty)
   const handleManualTriggerScan = useCallback(() => {
     if (!cvEngine) return;
     const sourceElement = isSimulating ? simulatedCanvas : videoRef.current;
@@ -240,6 +220,16 @@ export default function InspectionView({
       };
       const result = cvEngine.processFrame(sourceElement, activeSettings);
       if (result) {
+        if (!result.partDetected) {
+          // Camera sees no part! Never give OK or NOT OK, never count.
+          setInspectionResult((prev) => ({
+            ...prev,
+            status: 'NO_PART',
+            message: 'No Part Detected! Place PA6-GF50 Part in Center Reticle First.',
+          }));
+          return;
+        }
+
         drawOverlay(result, sourceElement);
         lockVerdict(result);
       }
@@ -268,7 +258,7 @@ export default function InspectionView({
   const processCurrentFrame = useCallback(() => {
     if (!cvEngine || !isInspecting) return;
 
-    // Do NOT process frames if currently locked in a verdict hold
+    // Do NOT process or change state if currently LOCKED on a final verdict
     if (cycleState === 'LOCKED') return;
 
     const sourceElement = isSimulating ? simulatedCanvas : videoRef.current;
@@ -289,30 +279,23 @@ export default function InspectionView({
 
       drawOverlay(result, sourceElement);
 
-      // Handle Scan Modes:
-      if (scanMode === 'continuous') {
-        // Continuous smooth live scanning
-        setInspectionResult(result);
-        setCycleState(result.partDetected ? 'ANALYZING' : 'POSITIONING');
-        return;
-      }
+      const partInView = Boolean(result.partDetected);
 
+      // Manual mode: live reticle feedback without auto-locking
       if (scanMode === 'manual') {
-        // In manual mode, only update reticle guide without locking automatically
         setInspectionResult({
           ...result,
-          message: result.partDetected
-            ? 'Part Detected • Press "SCAN PART" to Inspect'
-            : 'Align Part in Reticle • Press "SCAN PART"',
+          status: partInView ? 'READY' : 'SEARCHING',
+          message: partInView
+            ? 'Part Detected in Reticle • Tap "SCAN PART" to Inspect'
+            : 'Align PA6-GF50 Part in Center Reticle',
         });
-        setCycleState(result.partDetected ? 'STABILIZING' : 'POSITIONING');
+        setCycleState(partInView ? 'STABILIZING' : 'POSITIONING');
         return;
       }
 
-      // Auto-Lock Cycle:
+      // Auto-Lock Cycle: Only triggers when part is genuinely detected in reticle
       if (scanMode === 'auto_lock') {
-        const partInView = result.partDetected || result.sleeves.some((s) => s.confidence > 25);
-
         if (partInView) {
           setStabilityCounter((prev) => {
             const nextCount = prev + 1;
@@ -326,7 +309,7 @@ export default function InspectionView({
               setInspectionResult({
                 ...result,
                 status: 'SEARCHING',
-                message: `Stabilizing part... (${nextCount}/${stableFramesRequired})`,
+                message: `Analyzing part... (${nextCount}/${stableFramesRequired})`,
               });
               return nextCount;
             }
@@ -359,7 +342,7 @@ export default function InspectionView({
     lockVerdict,
   ]);
 
-  // Inspection Loop throttled to calibrated scanSpeedMs (default 220ms)
+  // Inspection Loop throttled to calibrated scanSpeedMs
   const runInspectionLoop = useCallback(() => {
     if (!isInspecting) return;
 
@@ -410,6 +393,7 @@ export default function InspectionView({
 
     const cx = canvas.width / 2;
     const cy = canvas.height / 2;
+    const isLocked = cycleState === 'LOCKED';
 
     // 1. Draw Homography Bounding Box if Part is Detected
     if (result.partDetected && result.debug?.corners && result.debug.corners.length === 4) {
@@ -421,24 +405,24 @@ export default function InspectionView({
         ctx.lineTo(corners[i].x, corners[i].y);
       }
       ctx.closePath();
-      ctx.strokeStyle = cycleState === 'LOCKED' 
+      ctx.strokeStyle = isLocked 
         ? (result.status === 'PASS' ? 'rgba(16, 185, 129, 0.95)' : 'rgba(239, 68, 68, 0.95)')
         : 'rgba(14, 165, 233, 0.9)';
       ctx.lineWidth = 3.5;
       ctx.stroke();
 
-      ctx.fillStyle = cycleState === 'LOCKED'
-        ? (result.status === 'PASS' ? 'rgba(16, 185, 129, 0.08)' : 'rgba(239, 68, 68, 0.08)')
+      ctx.fillStyle = isLocked
+        ? (result.status === 'PASS' ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)')
         : 'rgba(14, 165, 233, 0.08)';
       ctx.fill();
       ctx.restore();
-    } else if (!result.partDetected && cycleState !== 'LOCKED') {
+    } else if (!isLocked) {
       // Draw Circular Industrial Reticle for Hub Placement
-      const reticleR = Math.min(canvas.width, canvas.height) * 0.22;
+      const reticleR = Math.min(canvas.width, canvas.height) * 0.24;
       ctx.save();
-      ctx.strokeStyle = 'rgba(217, 119, 6, 0.75)';
+      ctx.strokeStyle = result.partDetected ? 'rgba(14, 165, 233, 0.9)' : 'rgba(217, 119, 6, 0.8)';
       ctx.lineWidth = 2.5;
-      ctx.setLineDash([8, 6]);
+      ctx.setLineDash(result.partDetected ? [] : [8, 6]);
       ctx.beginPath();
       ctx.arc(cx, cy, reticleR, 0, Math.PI * 2);
       ctx.stroke();
@@ -448,77 +432,84 @@ export default function InspectionView({
       ctx.beginPath();
       ctx.moveTo(cx - 16, cy); ctx.lineTo(cx + 16, cy);
       ctx.moveTo(cx, cy - 16); ctx.lineTo(cx, cy + 16);
-      ctx.strokeStyle = 'rgba(217, 119, 6, 0.9)';
+      ctx.strokeStyle = result.partDetected ? 'rgba(14, 165, 233, 0.95)' : 'rgba(217, 119, 6, 0.9)';
       ctx.lineWidth = 2;
       ctx.stroke();
 
       ctx.font = 'bold 12px sans-serif';
-      ctx.fillStyle = 'rgba(217, 119, 6, 0.95)';
+      ctx.fillStyle = result.partDetected ? 'rgba(14, 165, 233, 0.95)' : 'rgba(217, 119, 6, 0.95)';
       ctx.textAlign = 'center';
-      ctx.fillText('ALIGN MOTOR HUB IN CENTER', cx, cy + reticleR + 24);
+      ctx.fillText(
+        result.partDetected ? '✓ PART IN RETICLE • READY' : 'ALIGN MOTOR HUB IN CENTER',
+        cx,
+        cy + reticleR + 24
+      );
       ctx.restore();
     }
 
-    // 2. Draw Sleeve Inspection Regions (Position 1, 2, 3)
-    result.sleeves.forEach((sleeve, idx) => {
-      const { x, y, radius, present } = sleeve;
-      const isOk = present;
+    // 2. Draw Sleeve Inspection Regions (Position 1, 2, 3) - Only if part is detected or locked
+    if ((isLocked || result.partDetected) && result.sleeves && result.sleeves.length > 0) {
+      result.sleeves.forEach((sleeve, idx) => {
+        const { x, y, radius, present } = sleeve;
+        const isOk = present;
 
-      ctx.save();
-      const circleRadius = Math.max(20, radius);
+        ctx.save();
+        const circleRadius = Math.max(18, radius);
 
-      // Outer glow
-      ctx.beginPath();
-      ctx.arc(x, y, circleRadius + 6, 0, Math.PI * 2);
-      ctx.strokeStyle = isOk ? 'rgba(16, 185, 129, 0.5)' : 'rgba(239, 68, 68, 0.8)';
-      ctx.lineWidth = 3.5;
-      ctx.stroke();
+        // Outer glow
+        ctx.beginPath();
+        ctx.arc(x, y, circleRadius + 6, 0, Math.PI * 2);
+        ctx.strokeStyle = isOk ? 'rgba(16, 185, 129, 0.5)' : 'rgba(239, 68, 68, 0.8)';
+        ctx.lineWidth = 3.5;
+        ctx.stroke();
 
-      // Main Circle: GREEN for PRESENT, RED for MISSING
-      ctx.beginPath();
-      ctx.arc(x, y, circleRadius, 0, Math.PI * 2);
-      ctx.strokeStyle = isOk ? '#059669' : '#dc2626';
-      ctx.lineWidth = 4;
-      ctx.fillStyle = isOk ? 'rgba(16, 185, 129, 0.25)' : 'rgba(239, 68, 68, 0.35)';
-      ctx.fill();
-      ctx.stroke();
+        // Main Circle: GREEN for PRESENT, RED for MISSING
+        ctx.beginPath();
+        ctx.arc(x, y, circleRadius, 0, Math.PI * 2);
+        ctx.strokeStyle = isOk ? '#059669' : '#dc2626';
+        ctx.lineWidth = 4;
+        ctx.fillStyle = isOk ? 'rgba(16, 185, 129, 0.25)' : 'rgba(239, 68, 68, 0.35)';
+        ctx.fill();
+        ctx.stroke();
 
-      // Center Icon
-      ctx.font = `bold ${Math.round(circleRadius * 0.85)}px sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(isOk ? '✓' : '✕', x, y);
+        // Center Icon
+        ctx.font = `bold ${Math.round(circleRadius * 0.85)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(isOk ? '✓' : '✕', x, y);
 
-      // Status Tag
-      ctx.font = 'bold 11px sans-serif';
-      const posName = sleeve.name || `Sleeve ${idx + 1}`;
-      const confText = sleeve.confidence !== undefined ? ` (${sleeve.confidence}%)` : '';
-      const label = isOk ? `${posName}: OK${confText}` : `${posName}: MISSING${confText}`;
-      const textWidth = ctx.measureText(label).width;
+        // Status Tag
+        ctx.font = 'bold 11px sans-serif';
+        const posName = sleeve.name ? sleeve.name.split(' ')[0] + ' ' + (idx + 1) : `Sleeve ${idx + 1}`;
+        const confText = sleeve.confidence !== undefined ? ` (${sleeve.confidence}%)` : '';
+        const label = isOk ? `${posName}: OK${confText}` : `${posName}: MISSING`;
+        const textWidth = ctx.measureText(label).width;
 
-      const tagY = y - circleRadius - 16;
-      ctx.fillStyle = isOk ? '#059669' : '#dc2626';
-      ctx.fillRect(x - textWidth / 2 - 6, tagY - 10, textWidth + 12, 20);
+        const tagY = y - circleRadius - 14;
+        ctx.fillStyle = isOk ? '#059669' : '#dc2626';
+        ctx.fillRect(x - textWidth / 2 - 5, tagY - 9, textWidth + 10, 18);
 
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 1.2;
-      ctx.strokeRect(x - textWidth / 2 - 6, tagY - 10, textWidth + 12, 20);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(x - textWidth / 2 - 5, tagY - 9, textWidth + 10, 18);
 
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(label, x, tagY);
-      ctx.restore();
-    });
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(label, x, tagY);
+        ctx.restore();
+      });
+    }
   };
 
   const isLocked = cycleState === 'LOCKED';
-  const status = isLocked ? inspectionResult.status : (cycleState === 'STABILIZING' ? 'STABILIZING' : inspectionResult.status);
-  const presentCount = inspectionResult.sleeves.filter((s) => s.present).length;
+  const isPass = isLocked && (inspectionResult.status === 'PASS' || inspectionResult.result === 'PASS');
+  const isFail = isLocked && (inspectionResult.status === 'FAIL' || inspectionResult.result === 'FAIL');
+  const partDetected = inspectionResult.partDetected;
 
   return (
     <div
       ref={containerRef}
-      className="relative flex-1 w-full h-full bg-slate-950 overflow-hidden flex flex-col select-none"
+      className="relative flex-1 w-full h-[100dvh] bg-slate-950 overflow-hidden flex flex-col select-none touch-manipulation"
     >
       {/* 1. Camera Video Feed */}
       <video
@@ -534,8 +525,8 @@ export default function InspectionView({
       {/* Virtual Simulator Stream */}
       {isSimulating && (
         <div className="absolute inset-0 w-full h-full flex items-center justify-center bg-slate-900 z-0">
-          <div className="text-white text-xs font-bold bg-indigo-600/90 px-3 py-1.5 rounded-full absolute top-4 left-4 z-20 shadow">
-            ● Virtual PA6-GF50 Test Bench Active
+          <div className="text-white text-xs font-bold bg-indigo-600/90 px-3 py-1.5 rounded-full absolute top-3 left-3 z-20 shadow">
+            ● Virtual Test Bench Active
           </div>
         </div>
       )}
@@ -546,134 +537,110 @@ export default function InspectionView({
         className="absolute inset-0 w-full h-full object-cover pointer-events-none z-10"
       />
 
-      {/* 2. FLOATING TOP RESULT BANNER & STATS */}
-      <div className="absolute top-3 left-3 right-3 z-30 flex flex-col items-center pointer-events-none space-y-2">
+      {/* 2. TOP RESULT BANNER & STATS (Mobile-Optimized) */}
+      <div className="absolute top-2 sm:top-3 left-2 sm:left-3 right-2 sm:right-3 z-30 flex flex-col items-center pointer-events-none space-y-1.5">
         {/* Main Verdict Card */}
         <div
-          className={`w-full max-w-xl py-2.5 px-4 rounded-2xl transition-all duration-300 shadow-2xl flex items-center justify-between pointer-events-auto backdrop-blur-md ${
-            isLocked && status === 'PASS'
+          className={`w-full max-w-lg p-2.5 sm:p-3.5 rounded-2xl transition-all duration-300 shadow-2xl flex items-center justify-between pointer-events-auto backdrop-blur-md ${
+            isPass
               ? 'bg-emerald-600/95 text-white border-2 border-emerald-300 ring-4 ring-emerald-500/30'
-              : isLocked && status === 'FAIL'
+              : isFail
               ? 'bg-rose-600/95 text-white border-2 border-rose-300 ring-4 ring-rose-500/30'
-              : cycleState === 'STABILIZING'
-              ? 'bg-indigo-600/95 text-white border-2 border-indigo-300'
-              : 'bg-white/95 text-slate-800 border border-slate-300 shadow-lg'
+              : partDetected
+              ? 'bg-slate-900/90 text-white border-2 border-sky-400 shadow-xl'
+              : 'bg-slate-900/85 text-white border border-slate-700 shadow-lg'
           }`}
         >
-          <div className="flex items-center space-x-3">
-            {isLocked && status === 'PASS' && (
-              <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center">
-                <CheckCircle className="w-8 h-8 text-white shrink-0" />
+          <div className="flex items-center space-x-2.5 sm:space-x-3 min-w-0">
+            {isPass && (
+              <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
+                <CheckCircle className="w-7 h-7 sm:w-8 sm:h-8 text-white" />
               </div>
             )}
-            {isLocked && status === 'FAIL' && (
-              <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center">
-                <AlertTriangle className="w-8 h-8 text-white shrink-0" />
+            {isFail && (
+              <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-7 h-7 sm:w-8 sm:h-8 text-white" />
               </div>
             )}
-            {!isLocked && cycleState === 'STABILIZING' && (
-              <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center">
-                <Timer className="w-6 h-6 text-white animate-spin shrink-0" />
+            {!isLocked && partDetected && (
+              <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-sky-500/20 border border-sky-400 flex items-center justify-center text-sky-400 shrink-0">
+                <Scan className="w-5 h-5 animate-pulse" />
               </div>
             )}
-            {!isLocked && cycleState === 'POSITIONING' && (
-              <div className="w-9 h-9 rounded-xl bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-700">
-                <Scan className="w-5 h-5" />
+            {!isLocked && !partDetected && isInspecting && (
+              <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-amber-500/20 border border-amber-400 flex items-center justify-center text-amber-400 shrink-0">
+                <Eye className="w-5 h-5" />
               </div>
             )}
             {!isInspecting && (
-              <div className="w-9 h-9 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-700">
-                <Zap className="w-5 h-5 text-indigo-600 shrink-0" />
+              <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-300 shrink-0">
+                <Zap className="w-5 h-5 text-indigo-400" />
               </div>
             )}
 
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center space-x-2">
-                <span className="text-xl sm:text-3xl font-black tracking-wide leading-tight">
-                  {isLocked && status === 'PASS'
+                <span className="text-base sm:text-2xl font-black tracking-wide leading-tight truncate">
+                  {isPass
                     ? 'PASS (OK PART)'
-                    : isLocked && status === 'FAIL'
+                    : isFail
                     ? 'REJECT (DEFECT)'
-                    : cycleState === 'STABILIZING'
-                    ? 'STABILIZING...'
-                    : cycleState === 'POSITIONING'
+                    : partDetected
+                    ? 'PART DETECTED'
+                    : isInspecting
                     ? 'ALIGN PART'
                     : 'READY'}
                 </span>
                 {isLocked && (
-                  <span className="px-2 py-0.5 rounded-full bg-white/25 text-white text-[10px] font-black uppercase tracking-wider flex items-center space-x-1">
-                    <Lock className="w-3 h-3" />
-                    <span>LOCKED</span>
+                  <span className="px-1.5 py-0.5 rounded-full bg-white/25 text-white text-[9px] font-black uppercase tracking-wider shrink-0">
+                    LOCKED
                   </span>
                 )}
               </div>
-              <span className="text-xs sm:text-sm font-semibold opacity-95 block">
-                {isLocked && status === 'PASS'
+              <span className="text-[11px] sm:text-xs font-semibold opacity-95 block truncate">
+                {isPass
                   ? `All ${totalTargetSleeves} metal sleeves verified present and seated`
-                  : isLocked && status === 'FAIL'
-                  ? `${inspectionResult.missingCount} metal sleeve missing — remove part from line`
-                  : cycleState === 'STABILIZING'
-                  ? `Holding steady (${stabilityCounter}/${stableFramesRequired})...`
-                  : cycleState === 'POSITIONING'
-                  ? 'Center the circular motor hub in the reticle'
-                  : 'Press "Start Inspection" to begin shop-floor QC'}
+                  : isFail
+                  ? `${inspectionResult.missingCount} sleeve missing — remove part from line`
+                  : partDetected
+                  ? (scanMode === 'manual' ? 'Tap "SCAN PART" to analyze' : 'Holding steady...')
+                  : isInspecting
+                  ? 'Center circular hub in the reticle'
+                  : 'Press "Start Live Inspection" to begin'}
               </span>
             </div>
           </div>
 
-          {/* Right Action / Countdown Button */}
-          <div className="flex items-center space-x-2">
+          {/* Quick Action Button on Banner */}
+          <div className="flex items-center space-x-1.5 shrink-0 ml-2">
             {isLocked ? (
               <button
                 onClick={unlockAndReadyNextPart}
-                className="flex items-center space-x-1.5 px-3.5 py-2 rounded-xl bg-white text-slate-900 text-xs font-black shadow-lg hover:bg-slate-100 transition active:scale-95 cursor-pointer"
+                className="flex items-center space-x-1 px-3 sm:px-4 py-2 rounded-xl bg-white text-slate-900 text-xs sm:text-sm font-black shadow-lg hover:bg-slate-100 transition active:scale-95 cursor-pointer"
               >
                 <span>Next Part</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
             ) : (
-              <div className="flex items-center space-x-1">
-                <button
-                  onClick={toggleMute}
-                  className={`p-2 rounded-xl border transition cursor-pointer ${
-                    isMuted ? 'bg-rose-100 text-rose-700 border-rose-300' : 'bg-white text-slate-700 border-slate-200'
-                  }`}
-                  title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
-                >
-                  {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-                </button>
-                <button
-                  onClick={toggleFullscreen}
-                  className="p-2 rounded-xl bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 transition cursor-pointer"
-                  title="Toggle Fullscreen"
-                >
-                  {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-                </button>
-              </div>
+              <button
+                onClick={toggleFullscreen}
+                className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white border border-white/20 transition cursor-pointer"
+                title="Toggle Fullscreen"
+              >
+                {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+              </button>
             )}
           </div>
         </div>
 
-        {/* Hold Verdict Progress Bar (When Locked in Auto-Lock mode) */}
-        {isLocked && scanMode === 'auto_lock' && (
-          <div className="w-full max-w-xl h-2 bg-slate-800/80 rounded-full overflow-hidden border border-slate-700 pointer-events-auto shadow-md">
-            <div
-              className={`h-full transition-all duration-75 ${
-                status === 'PASS' ? 'bg-emerald-400' : 'bg-rose-400'
-              }`}
-              style={{ width: `${lockProgress}%` }}
-            />
-          </div>
-        )}
-
-        {/* QC Shift Statistics Bar */}
-        <div className="flex items-center space-x-2 bg-slate-900/85 backdrop-blur-md px-3.5 py-1 rounded-full border border-slate-700 text-white text-[11px] font-bold shadow-lg pointer-events-auto">
+        {/* Shift QC Statistics Strip (Mobile Compact) */}
+        <div className="flex items-center space-x-2 bg-slate-900/90 backdrop-blur-md px-3 py-1 rounded-full border border-slate-700 text-white text-[11px] font-bold shadow-md pointer-events-auto">
           <span className="text-slate-400">Shift QC:</span>
           <span>Total: <strong className="text-white font-mono">{qcStats.total}</strong></span>
           <span className="text-slate-600">•</span>
-          <span className="text-emerald-400">Pass: <strong className="font-mono">{qcStats.passed}</strong></span>
+          <span className="text-emerald-400">OK: <strong className="font-mono">{qcStats.passed}</strong></span>
           <span className="text-slate-600">•</span>
-          <span className="text-rose-400">Fail: <strong className="font-mono">{qcStats.failed}</strong></span>
+          <span className="text-rose-400">Defect: <strong className="font-mono">{qcStats.failed}</strong></span>
           <span className="text-slate-600">•</span>
           <span className="text-amber-300">
             Yield: <strong className="font-mono">{qcStats.total > 0 ? Math.round((qcStats.passed / qcStats.total) * 100) : 100}%</strong>
@@ -681,73 +648,16 @@ export default function InspectionView({
           {qcStats.total > 0 && (
             <button
               onClick={() => setQcStats({ total: 0, passed: 0, failed: 0 })}
-              className="ml-1 text-slate-400 hover:text-white transition"
+              className="ml-1 text-slate-400 hover:text-white transition cursor-pointer"
               title="Reset Shift Counter"
             >
               <RotateCcw className="w-3 h-3" />
             </button>
           )}
         </div>
-
-        {/* Mode Selector & Speed Switcher */}
-        {isInspecting && (
-          <div className="flex items-center space-x-2 bg-white/95 backdrop-blur-md px-3 py-1.5 rounded-2xl border border-slate-300 shadow-md pointer-events-auto text-[11px] font-bold text-slate-800">
-            <span className="text-slate-500 font-semibold">Mode:</span>
-            <button
-              onClick={() => setScanMode('auto_lock')}
-              className={`px-2.5 py-1 rounded-xl transition cursor-pointer ${
-                scanMode === 'auto_lock'
-                  ? 'bg-indigo-600 text-white shadow-xs'
-                  : 'text-slate-600 hover:bg-slate-100'
-              }`}
-            >
-              Auto-Lock (2.5s)
-            </button>
-            <button
-              onClick={() => setScanMode('manual')}
-              className={`px-2.5 py-1 rounded-xl transition cursor-pointer ${
-                scanMode === 'manual'
-                  ? 'bg-indigo-600 text-white shadow-xs'
-                  : 'text-slate-600 hover:bg-slate-100'
-              }`}
-            >
-              Tap to Scan
-            </button>
-            <button
-              onClick={() => setScanMode('continuous')}
-              className={`px-2.5 py-1 rounded-xl transition cursor-pointer ${
-                scanMode === 'continuous'
-                  ? 'bg-indigo-600 text-white shadow-xs'
-                  : 'text-slate-600 hover:bg-slate-100'
-              }`}
-            >
-              Continuous
-            </button>
-
-            <div className="h-4 w-px bg-slate-300 mx-1"></div>
-
-            <span className="text-slate-500 font-semibold">Speed:</span>
-            <button
-              onClick={() => setScanSpeedMs(250)}
-              className={`px-2 py-0.5 rounded-lg transition cursor-pointer ${
-                scanSpeedMs === 250 ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'
-              }`}
-            >
-              Calibrated (250ms)
-            </button>
-            <button
-              onClick={() => setScanSpeedMs(150)}
-              className={`px-2 py-0.5 rounded-lg transition cursor-pointer ${
-                scanSpeedMs === 150 ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'
-              }`}
-            >
-              Fast (150ms)
-            </button>
-          </div>
-        )}
       </div>
 
-      {/* 3. DEBUG MODE OVERLAY PANEL */}
+      {/* 3. DEBUG TELEMETRY PANEL */}
       <DebugPanel
         inspectionResult={inspectionResult}
         isVisible={isDebugMode && isInspecting}
@@ -756,21 +666,21 @@ export default function InspectionView({
 
       {/* 4. IDLE WELCOME CARD */}
       {!isInspecting && !isCameraActive && !isSimulating && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-          <div className="flex flex-col items-center justify-center p-6 text-center max-w-sm w-full bg-white rounded-3xl shadow-2xl border border-slate-200">
-            <div className="h-16 px-4 py-2 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-center mb-4 shadow-sm">
+        <div className="absolute inset-0 z-20 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm">
+          <div className="flex flex-col items-center justify-center p-5 sm:p-6 text-center max-w-sm w-full bg-white rounded-3xl shadow-2xl border border-slate-200">
+            <div className="h-14 sm:h-16 px-4 py-2 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-center mb-3 shadow-xs">
               <img
                 src="/radiance-polymer-logo.png"
                 alt="Radiance Polymer Logo"
-                className="h-12 w-auto max-w-[160px] object-contain"
+                className="h-10 sm:h-12 w-auto max-w-[140px] object-contain"
               />
             </div>
-            <h3 className="text-xl font-black text-slate-900 mb-1">Radiance Polymer Quality Control</h3>
-            <p className="text-xs font-bold text-indigo-700 uppercase tracking-wider mb-2">
+            <h3 className="text-lg sm:text-xl font-black text-slate-900 mb-0.5">Radiance Quality Control</h3>
+            <p className="text-[11px] font-bold text-indigo-700 uppercase tracking-wider mb-2">
               PA6-GF50 Fan Shroud (3 Metal Sleeves)
             </p>
             <p className="text-xs text-slate-500 mb-5 leading-relaxed">
-              Auto-Lock mode automatically stabilizes when part is aligned, gives definitive PASS/FAIL verdict, and holds for 2.5s without flickering.
+              Align part in reticle, tap <strong>Scan Part</strong> to inspect, view definitive PASSED/FAILED verdict, and tap <strong>Next Part</strong> for the next piece.
             </p>
 
             <button
@@ -793,7 +703,7 @@ export default function InspectionView({
 
       {/* Camera Error Alert */}
       {cameraError && (
-        <div className="absolute top-20 left-4 right-4 z-40 p-4 rounded-2xl bg-rose-50 border-2 border-rose-400 text-rose-900 text-xs shadow-2xl flex items-center space-x-3">
+        <div className="absolute top-16 left-3 right-3 z-40 p-3.5 rounded-2xl bg-rose-50 border-2 border-rose-400 text-rose-900 text-xs shadow-2xl flex items-center space-x-3">
           <AlertCircle className="w-6 h-6 text-rose-600 shrink-0" />
           <div>
             <span className="font-bold block">Camera Error</span>
@@ -802,86 +712,122 @@ export default function InspectionView({
         </div>
       )}
 
-      {/* 5. FLOATING BOTTOM CONTROL BAR */}
-      <div className="absolute bottom-4 left-3 right-3 z-30 flex justify-center pointer-events-none">
-        <div className="w-full max-w-xl p-2.5 sm:p-3 rounded-2xl bg-white/95 backdrop-blur-md border border-slate-200 shadow-2xl flex items-center justify-between gap-2 pointer-events-auto">
-          {/* Start/Stop Toggle Button */}
-          {isInspecting ? (
-            <button
-              onClick={handleStopInspection}
-              className="flex-1 flex items-center justify-center space-x-1.5 py-3 px-3 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-black text-xs sm:text-sm shadow-sm transition active:scale-95 cursor-pointer"
-            >
-              <Square className="w-4 h-4 fill-current" />
-              <span>Stop Inspection</span>
-            </button>
-          ) : (
-            <button
-              onClick={handleStartInspection}
-              className="flex-1 flex items-center justify-center space-x-1.5 py-3 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs sm:text-sm shadow-sm transition active:scale-95 cursor-pointer"
-            >
-              <Play className="w-4 h-4 fill-current" />
-              <span>Start Inspection</span>
-            </button>
-          )}
+      {/* 5. FLOATING BOTTOM ACTION BAR (Mobile-First Touch Ergonomics) */}
+      <div className="absolute bottom-3 sm:bottom-4 left-2 sm:left-4 right-2 sm:right-4 z-30 flex justify-center pointer-events-none pb-[env(safe-area-inset-bottom,0px)]">
+        <div className="w-full max-w-lg p-2 sm:p-2.5 rounded-2xl bg-slate-900/90 backdrop-blur-md border border-slate-700 shadow-2xl flex items-center justify-between gap-2 pointer-events-auto">
+          {/* STATE A: VERDICT LOCKED -> Primary Action is NEXT PART */}
+          {isLocked ? (
+            <>
+              {/* Massive "Next Part" button */}
+              <button
+                onClick={unlockAndReadyNextPart}
+                className="flex-1 py-3.5 sm:py-4 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-sm sm:text-base shadow-lg shadow-emerald-600/30 transition-all active:scale-95 cursor-pointer flex items-center justify-center space-x-2"
+              >
+                <span>Ready for Next Part</span>
+                <ArrowRight className="w-5 h-5" />
+              </button>
 
-          {/* Manual Trigger Scan Button (When in Manual or whenever user wants instant scan) */}
-          {isInspecting && (
-            <button
-              onClick={isLocked ? unlockAndReadyNextPart : handleManualTriggerScan}
-              className={`flex items-center space-x-1.5 px-4 py-3 rounded-xl font-black text-xs sm:text-sm shadow-md transition active:scale-95 cursor-pointer ${
-                isLocked
-                  ? 'bg-slate-800 hover:bg-slate-900 text-white'
-                  : 'bg-indigo-600 hover:bg-indigo-700 text-white'
-              }`}
-            >
-              {isLocked ? (
+              {/* Re-Scan Current Part Button */}
+              <button
+                onClick={handleManualTriggerScan}
+                className="p-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition active:scale-95 cursor-pointer"
+                title="Re-inspect current part"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
+
+              {/* Stop Inspection Button */}
+              <button
+                onClick={handleStopInspection}
+                className="p-3.5 rounded-xl bg-rose-900/50 hover:bg-rose-900 text-rose-300 border border-rose-800 transition active:scale-95 cursor-pointer"
+                title="Stop Inspection"
+              >
+                <Square className="w-4 h-4 fill-current" />
+              </button>
+            </>
+          ) : (
+            /* STATE B: LIVE INSPECTION / POSITIONING */
+            <>
+              {isInspecting ? (
                 <>
-                  <ArrowRight className="w-4 h-4" />
-                  <span>Next Part</span>
+                  {/* Primary "SCAN PART" Button */}
+                  <button
+                    onClick={handleManualTriggerScan}
+                    className="flex-1 py-3.5 sm:py-4 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-black text-sm sm:text-base shadow-lg shadow-indigo-600/30 transition-all active:scale-95 cursor-pointer flex items-center justify-center space-x-2"
+                  >
+                    <Scan className="w-5 h-5" />
+                    <span>Scan Part</span>
+                  </button>
+
+                  {/* Mode Selector Pill (Tap vs Auto) */}
+                  <button
+                    onClick={() => setScanMode(scanMode === 'manual' ? 'auto_lock' : 'manual')}
+                    className={`px-3 py-3 rounded-xl text-xs font-bold border transition cursor-pointer shrink-0 ${
+                      scanMode === 'auto_lock'
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                        : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+                    }`}
+                    title="Toggle between Tap to Scan and Auto-Detect"
+                  >
+                    <span>{scanMode === 'auto_lock' ? 'Auto' : 'Tap'}</span>
+                  </button>
+
+                  {/* Flip Camera (Switch Front/Back on Phone) */}
+                  <button
+                    onClick={switchCamera}
+                    disabled={!isCameraActive || isSimulating}
+                    className="p-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition active:scale-95 cursor-pointer disabled:opacity-40"
+                    title="Switch Front/Rear Phone Camera"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                  </button>
+
+                  {/* Stop Inspection */}
+                  <button
+                    onClick={handleStopInspection}
+                    className="p-3.5 rounded-xl bg-rose-900/50 hover:bg-rose-900 text-rose-300 border border-rose-800 transition active:scale-95 cursor-pointer"
+                    title="Stop Inspection"
+                  >
+                    <Square className="w-4 h-4 fill-current" />
+                  </button>
                 </>
               ) : (
-                <>
-                  <Scan className="w-4 h-4" />
-                  <span>Scan Part</span>
-                </>
+                /* STATE C: IDLE */
+                <button
+                  onClick={handleStartInspection}
+                  className="flex-1 py-3.5 sm:py-4 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-sm sm:text-base shadow-lg shadow-emerald-600/30 transition-all active:scale-95 cursor-pointer flex items-center justify-center space-x-2"
+                >
+                  <Play className="w-5 h-5 fill-current" />
+                  <span>Start Inspection</span>
+                </button>
               )}
-            </button>
+
+              {/* Master Setup Quick Icon */}
+              <button
+                onClick={() => {
+                  handleStopInspection();
+                  onOpenMasterSetup();
+                }}
+                className="p-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700 transition active:scale-95 cursor-pointer"
+                title="Master Learning Setup"
+              >
+                <Wrench className="w-4 h-4" />
+              </button>
+
+              {/* Debug Telemetry Toggle */}
+              <button
+                onClick={() => setIsDebugMode(!isDebugMode)}
+                className={`p-3.5 rounded-xl border transition active:scale-95 cursor-pointer ${
+                  isDebugMode
+                    ? 'bg-indigo-600 text-white border-indigo-400'
+                    : 'bg-slate-800 hover:bg-slate-700 text-slate-400 border-slate-700'
+                }`}
+                title="Toggle Debug Telemetry"
+              >
+                <Bug className="w-4 h-4" />
+              </button>
+            </>
           )}
-
-          {/* Flip Camera */}
-          <button
-            onClick={switchCamera}
-            disabled={!isCameraActive || isSimulating}
-            className="p-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition active:scale-95 cursor-pointer disabled:opacity-40"
-            title="Switch Front/Rear Camera"
-          >
-            <RefreshCw className="w-4 h-4" />
-          </button>
-
-          {/* Master Learning Setup */}
-          <button
-            onClick={() => {
-              handleStopInspection();
-              onOpenMasterSetup();
-            }}
-            className="p-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-indigo-700 border border-slate-200 transition active:scale-95 cursor-pointer"
-            title="Master Learning Setup"
-          >
-            <Wrench className="w-4 h-4" />
-          </button>
-
-          {/* Debug Toggle */}
-          <button
-            onClick={() => setIsDebugMode(!isDebugMode)}
-            className={`p-3 rounded-xl border transition active:scale-95 cursor-pointer ${
-              isDebugMode
-                ? 'bg-indigo-600 text-white border-indigo-400'
-                : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
-            }`}
-            title="Toggle Debug Telemetry"
-          >
-            <Bug className="w-4 h-4" />
-          </button>
         </div>
       </div>
     </div>

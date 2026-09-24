@@ -50,7 +50,7 @@ export default function App() {
   };
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-100 text-slate-900">
+    <div className="flex flex-col h-[100dvh] w-full overflow-hidden bg-slate-100 text-slate-900">
       {/* Hidden virtual canvas for simulated stream */}
       <canvas ref={simulatedCanvasRef} className="hidden" width={640} height={480} />
 

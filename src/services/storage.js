@@ -10,10 +10,10 @@ export const DEFAULT_SETTINGS = {
   alarmEnabled: true,             // audio alarm state
   drawPartOutline: true,          // draw bounding polygon
   drawKeypoints: false,           // debug feature points
-  inspectionIntervalMs: 220,      // calibrated 4.5 FPS deliberate inspection (prevents erratic scanning)
-  scanMode: 'auto_lock',          // 'auto_lock' | 'manual' | 'continuous'
-  lockDurationMs: 2500,           // freeze verdict for 2.5s on screen for operator
-  stabilityFrames: 3,             // require 3 consecutive stable frames before locking verdict
+  inspectionIntervalMs: 220,      // calibrated 4.5 FPS deliberate inspection
+  scanMode: 'manual',             // default to manual tap-to-scan, locks until "Next Part"
+  lockDurationMs: 0,              // 0 = hold until operator clicks Next Part (no auto-reset)
+  stabilityFrames: 3,             // require 3 consecutive stable frames if auto mode is used
 };
 
 export function loadMasterPart() {

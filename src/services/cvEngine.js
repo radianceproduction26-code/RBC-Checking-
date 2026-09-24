@@ -147,7 +147,7 @@ export class CVInspectionEngine {
         scaleY,
         settings
       );
-      if (cvResult) {
+      if (cvResult && cvResult.partDetected) {
         return cvResult;
       }
     }
@@ -404,6 +404,83 @@ export class CVInspectionEngine {
   }
 
   /**
+   * Evaluates whether a PA6-GF50 Fan Shroud part is physically present in the frame
+   * Tests for:
+   * 1. Hub / Body edge gradient energy in the reticle zone (uniform desk/wall has near 0)
+   * 2. Luminance standard deviation / contrast across the shroud region
+   * 3. Presence of dark plastic shroud material (PA6-GF50 is dark black/charcoal)
+   */
+  detectPartPresence(frameImgData, cvW, cvH, cx, cy, ringR) {
+    const data = frameImgData.data;
+    const testRadius = Math.round(ringR * 1.6);
+
+    let sampleCount = 0;
+    let sumBrightness = 0;
+    let sumSqBrightness = 0;
+    let darkPlasticPixels = 0;
+    let edgeGradientSum = 0;
+
+    const step = 4; // Sample every 4th pixel for high-speed performance
+    for (let dy = -testRadius; dy <= testRadius; dy += step) {
+      for (let dx = -testRadius; dx <= testRadius; dx += step) {
+        const dist = Math.hypot(dx, dy);
+        if (dist > testRadius) continue;
+
+        const px = Math.round(cx + dx);
+        const py = Math.round(cy + dy);
+        if (px < 2 || px >= cvW - 2 || py < 2 || py >= cvH - 2) continue;
+
+        const idx = (py * cvW + px) * 4;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        const lum = (r + g + b) / 3;
+
+        sampleCount++;
+        sumBrightness += lum;
+        sumSqBrightness += lum * lum;
+
+        // PA6-GF50 plastic is dark black / charcoal (< 125 in standard lighting)
+        if (lum < 125) {
+          darkPlasticPixels++;
+        }
+
+        // Fast horizontal & vertical gradient
+        const rightIdx = (py * cvW + (px + 2)) * 4;
+        const downIdx = ((py + 2) * cvW + px) * 4;
+        const gradX = Math.abs(lum - (data[rightIdx] + data[rightIdx + 1] + data[rightIdx + 2]) / 3);
+        const gradY = Math.abs(lum - (data[downIdx] + data[downIdx + 1] + data[downIdx + 2]) / 3);
+        edgeGradientSum += gradX + gradY;
+      }
+    }
+
+    if (sampleCount < 100) return { isPresent: false, confidence: 0 };
+
+    const avgLum = sumBrightness / sampleCount;
+    const variance = (sumSqBrightness / sampleCount) - (avgLum * avgLum);
+    const stdDev = Math.sqrt(Math.max(0, variance));
+    const avgGradient = edgeGradientSum / sampleCount;
+    const darkRatio = darkPlasticPixels / sampleCount;
+
+    // A real PA6-GF50 fan shroud has:
+    // - Significant texture / contour variation: stdDev >= 15 (uniform table/wall has < 12)
+    // - Structural edges from the central bore and shroud body: avgGradient >= 6.5
+    // - Presence of dark plastic body: darkRatio >= 0.12 OR strong contrast
+    const hasStructure = stdDev >= 15 && avgGradient >= 6.5;
+    const hasPartMaterial = darkRatio >= 0.10 || (stdDev >= 22 && avgGradient >= 9.0);
+
+    const isPresent = hasStructure && hasPartMaterial;
+
+    return {
+      isPresent,
+      avgLum: Math.round(avgLum),
+      stdDev: Math.round(stdDev),
+      avgGradient: Math.round(avgGradient * 10) / 10,
+      darkRatio: Math.round(darkRatio * 100) / 100,
+    };
+  }
+
+  /**
    * Geometric Reticle Fast Inspection (Active guide frame fallback)
    */
   runGeometricReticleInspection(frameImgData, cvW, cvH, scaleX, scaleY, settings) {
@@ -412,7 +489,33 @@ export class CVInspectionEngine {
     const ringR = cvW * 0.135;
     const baseRadius = 20;
 
-    // Fast 360° rotational sweep around central hub
+    // 1. Strict Part Presence Check - Never declare part detected if no part is in reticle!
+    const presence = this.detectPartPresence(frameImgData, cvW, cvH, cx, cy, ringR);
+    if (!presence.isPresent) {
+      return {
+        partDetected: false,
+        matchedFeatures: 0,
+        detectedRotationDeg: 0,
+        sleeve1: 'unknown',
+        sleeve2: 'unknown',
+        sleeve3: 'unknown',
+        result: 'SEARCHING',
+        status: 'SEARCHING',
+        message: 'Align PA6-GF50 Part in Center Reticle',
+        sleeves: [],
+        allPresent: false,
+        missingCount: 0,
+        debug: {
+          presence,
+          keypoints: [],
+          inliers: 0,
+          matchedFeatures: 0,
+          corners: [],
+        },
+      };
+    }
+
+    // 2. Fast 360° rotational sweep around central hub
     const nominalAngles = [180, 302.5, 57.5];
     const data = frameImgData.data;
 
@@ -514,6 +617,7 @@ export class CVInspectionEngine {
       allPresent,
       missingCount,
       debug: {
+        presence,
         keypoints: [],
         inliers: 18,
         matchedFeatures: 45,
@@ -529,16 +633,17 @@ export class CVInspectionEngine {
 
   /**
    * Evaluates 3 Distinct Physical Metrics:
-   * 1. Metal Brightness
-   * 2. Edge Density (Knurling / Teeth)
-   * 3. Circular Geometry (Annular Rim vs Hole)
+   * 1. Metal Brightness (Brass golden sheen or specular reflection vs surrounding dark plastic)
+   * 2. Edge Density (Knurling / Teeth on outer diameter)
+   * 3. Circular Geometry (Annular Rim vs Inner Void & Outer Boss)
    */
   measureSleeveMetrics(imgData, cx, cy, radius, width, height) {
     const data = imgData.data;
     const rInt = Math.max(6, Math.round(radius));
 
     const minR = Math.round(rInt * 0.40);
-    const maxR = Math.round(rInt * 1.20);
+    const maxR = Math.round(rInt * 1.15);
+    const outerR = Math.round(rInt * 1.60);
 
     let ringPixels = 0;
     let ringBrightnessSum = 0;
@@ -548,8 +653,11 @@ export class CVInspectionEngine {
     let centerPixels = 0;
     let centerBrightnessSum = 0;
 
-    for (let dy = -maxR; dy <= maxR; dy += 2) {
-      for (let dx = -maxR; dx <= maxR; dx += 2) {
+    let outerBossPixels = 0;
+    let outerBossBrightnessSum = 0;
+
+    for (let dy = -outerR; dy <= outerR; dy += 2) {
+      for (let dx = -outerR; dx <= outerR; dx += 2) {
         const dist = Math.hypot(dx, dy);
         const px = Math.round(cx + dx);
         const py = Math.round(cy + dy);
@@ -562,7 +670,7 @@ export class CVInspectionEngine {
         const b = data[idx + 2];
         const brightness = (r + g + b) / 3;
 
-        // Metric 2: Edge gradient calculation using adjacent pixel differences
+        // Metric 2: Edge gradient calculation
         const rightIdx = (py * width + (px + 1)) * 4;
         const downIdx = ((py + 1) * width + px) * 4;
         const gradX = Math.abs(brightness - (data[rightIdx] + data[rightIdx + 1] + data[rightIdx + 2]) / 3);
@@ -570,44 +678,62 @@ export class CVInspectionEngine {
         const gradient = gradX + gradY;
 
         if (dist >= minR && dist <= maxR) {
+          // Inside the metal sleeve annular ring
           ringPixels++;
           ringBrightnessSum += brightness;
           edgeGradientSum += gradient;
 
-          // Metric 1: Metal Brightness condition (brass golden sheen or specular reflection)
-          const isBrass = r > b + 14 && g > b + 6 && r > 55;
-          const isSpecular = brightness > 125 && Math.abs(r - g) < 40;
+          // Brass metal sheen: warm golden ratio (red/green noticeably higher than blue)
+          const isBrass = r > 70 && g > 60 && b < r - 15 && r > b * 1.25;
+          // Specular metallic sheen: high brightness with neutral or golden balance
+          const isSpecular = brightness > 140 && Math.abs(r - g) < 35 && brightness > b + 10;
 
           if (isBrass || isSpecular) {
             metallicHighlightPixels++;
           }
         } else if (dist < minR * 0.5) {
+          // Inside the central hole/void
           centerPixels++;
           centerBrightnessSum += brightness;
+        } else if (dist > maxR && dist <= outerR) {
+          // Surrounding plastic boss
+          outerBossPixels++;
+          outerBossBrightnessSum += brightness;
         }
       }
     }
 
     const avgRingBrightness = ringPixels > 0 ? ringBrightnessSum / ringPixels : 0;
     const avgCenterBrightness = centerPixels > 0 ? centerBrightnessSum / centerPixels : 0;
+    const avgOuterBossBrightness = outerBossPixels > 0 ? outerBossBrightnessSum / outerBossPixels : 0;
     const avgEdgeGradient = ringPixels > 0 ? edgeGradientSum / ringPixels : 0;
+
+    // A real metal sleeve MUST stand out from both the inner hole AND the outer plastic boss
+    const ringToCenterContrast = Math.max(0, avgRingBrightness - avgCenterBrightness);
+    const ringToBossContrast = Math.max(0, avgRingBrightness - avgOuterBossBrightness);
+
+    // If the whole area is uniform white/light (like a plain table or white paper), contrast is near 0
+    const hasAnnularStructure = ringToCenterContrast > 14 || ringToBossContrast > 16;
 
     // 1. Metal Brightness Score [0..1]
     const metallicRatio = ringPixels > 0 ? metallicHighlightPixels / ringPixels : 0;
-    const metalBrightness = Math.min(1.0, metallicRatio * 1.25);
+    const metalBrightness = hasAnnularStructure
+      ? Math.min(1.0, metallicRatio * 1.35 + (ringToBossContrast / 90) * 0.35)
+      : Math.min(0.2, metallicRatio * 0.25);
 
     // 2. Edge Density Score [0..1] (Outer knurled teeth create high gradient energy)
-    const edgeDensity = Math.min(1.0, avgEdgeGradient / 32);
+    const edgeDensity = hasAnnularStructure ? Math.min(1.0, avgEdgeGradient / 30) : 0;
 
     // 3. Circular Geometry Score [0..1] (Contrast between metallic annular ring and inner void)
-    const ringToCenterContrast = Math.max(0, avgRingBrightness - avgCenterBrightness);
-    const circularGeometry = Math.min(1.0, ringToCenterContrast / 85);
+    const circularGeometry = hasAnnularStructure ? Math.min(1.0, ringToCenterContrast / 70) : 0;
 
     return {
       metalBrightness: Math.round(metalBrightness * 100) / 100,
       edgeDensity: Math.round(edgeDensity * 100) / 100,
       circularGeometry: Math.round(circularGeometry * 100) / 100,
       avgRingBrightness: Math.round(avgRingBrightness),
+      ringToCenterContrast: Math.round(ringToCenterContrast),
+      ringToBossContrast: Math.round(ringToBossContrast),
     };
   }
 
